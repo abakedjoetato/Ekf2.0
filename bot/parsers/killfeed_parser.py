@@ -389,11 +389,14 @@ class KillfeedParser:
             # Build embed using EmbedFactory
             embed, file_attachment = await EmbedFactory.build(embed_type, embed_data)
 
-            # Queue embed with batch sender to avoid rate limits
-            await self.bot.batch_sender.queue_embed(
+            # Use advanced rate limiter for killfeed events
+            from bot.utils.advanced_rate_limiter import MessagePriority
+            
+            await self.bot.advanced_rate_limiter.queue_message(
                 channel_id=channel.id,
                 embed=embed,
-                file=file_attachment
+                file=file_attachment,
+                priority=MessagePriority.NORMAL
             )
 
         except Exception as e:

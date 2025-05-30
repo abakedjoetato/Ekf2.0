@@ -145,7 +145,7 @@ class EmeraldKillfeedBot(commands.Bot):
             command_count = 0
             command_source = "none"
             command_names = []
-            
+
             # Check all possible command storage locations
             if hasattr(self, 'pending_application_commands') and self.pending_application_commands:
                 command_count = len(self.pending_application_commands)
@@ -155,7 +155,7 @@ class EmeraldKillfeedBot(commands.Bot):
                 command_count = len(self.application_commands)
                 command_names = [cmd.name for cmd in self.application_commands]
                 command_source = "application_commands"
-            
+
             logger.info(f"📊 Loaded {len(loaded_cogs)}/{len(cogs)} cogs successfully")
             logger.info(f"📊 Total slash commands registered: {command_count} (via {command_source})")
 
@@ -176,11 +176,11 @@ class EmeraldKillfeedBot(commands.Bot):
             if failed_cogs:
                 logger.error(f"❌ Failed cogs: {failed_cogs}")
                 return False
-            
+
             if command_count == 0:
                 logger.error("❌ Critical: No commands registered despite successful cog loading")
                 return False
-                
+
             logger.info("✅ All cogs loaded and commands registered successfully")
             return True
 
@@ -200,7 +200,7 @@ class EmeraldKillfeedBot(commands.Bot):
             command_count = 0
             commands_source = "none"
             command_names = []
-            
+
             if hasattr(self, 'application_commands') and self.application_commands:
                 command_count = len(self.application_commands)
                 command_names = [cmd.name for cmd in self.application_commands]
@@ -213,9 +213,9 @@ class EmeraldKillfeedBot(commands.Bot):
                 command_count = len(self.slash_commands)
                 command_names = [cmd.name for cmd in self.slash_commands]
                 commands_source = "slash_commands"
-            
+
             logger.info(f"📊 {command_count} commands found via {commands_source}")
-            
+
             # Debug: Show actual command names
             if command_count > 0:
                 logger.info(f"🔍 Commands to sync: {', '.join(command_names[:10])}{'...' if len(command_names) > 10 else ''}")
@@ -259,7 +259,7 @@ class EmeraldKillfeedBot(commands.Bot):
                 error_msg = str(e).lower()
                 if "rate limited" in error_msg or "429" in error_msg:
                     logger.error(f"❌ Global sync rate limited: {e}")
-                    
+
                     # Extract retry time and save cooldown for future attempts
                     retry_match = re.search(r'Retrying in ([\d.]+) seconds', str(e))
                     if retry_match:
@@ -268,7 +268,7 @@ class EmeraldKillfeedBot(commands.Bot):
                         with open(rate_limit_file, 'w') as f:
                             f.write(str(cooldown_until))
                         logger.error(f"💾 Rate limit cooldown saved for {retry_time + 60}s")
-                    
+
                     # Continue to guild fallback instead of returning
                     logger.info("🏠 Global sync rate limited - proceeding to guild fallback")
                 else:
@@ -278,21 +278,21 @@ class EmeraldKillfeedBot(commands.Bot):
             logger.info(f"🏠 Attempting PER-GUILD sync fallback for {len(self.guilds)} guilds...")
             success_count = 0
             rate_limited = False
-            
+
             for guild in self.guilds:
                 if rate_limited:
                     break
-                    
+
                 try:
                     # Use py-cord specific guild sync method with guild_ids parameter
                     await asyncio.wait_for(self.sync_commands(guild_ids=[guild.id]), timeout=15)
                     success_count += 1
                     logger.info(f"✅ GUILD SYNC SUCCESSFUL: {guild.name}")
-                    
+
                     # Small delay between guild syncs to avoid rate limits
                     if success_count < len(self.guilds):
                         await asyncio.sleep(3)
-                        
+
                 except Exception as guild_error:
                     error_msg = str(guild_error).lower()
                     if "rate limited" in error_msg or "429" in error_msg:
@@ -301,7 +301,7 @@ class EmeraldKillfeedBot(commands.Bot):
                         break
                     else:
                         logger.warning(f"⚠️ Guild sync failed for {guild.name}: {guild_error}")
-            
+
             if success_count > 0:
                 logger.info(f"✅ GUILD FALLBACK COMPLETED: {success_count}/{len(self.guilds)} successful")
                 return
@@ -397,11 +397,11 @@ class EmeraldKillfeedBot(commands.Bot):
             # STEP 1: Load cogs with proper async loading
             logger.info("🔧 Loading cogs for command registration...")
             cogs_success = await self.load_cogs()
-            
+
             if not cogs_success:
                 logger.error("❌ Cog loading failed - aborting setup")
                 return
-                
+
             logger.info("✅ Cog loading: Complete")
 
             # STEP 2: Verify commands are actually registered
@@ -410,11 +410,11 @@ class EmeraldKillfeedBot(commands.Bot):
                 command_count = len(self.pending_application_commands)
             elif hasattr(self, 'application_commands'):
                 command_count = len(self.application_commands)
-                
+
             if command_count == 0:
                 logger.error("❌ CRITICAL: No commands found after cog loading - fix required")
                 return
-                
+
             logger.info(f"✅ {command_count} commands registered and ready for sync")
 
             # STEP 3: Command sync - simplified and robust
@@ -452,7 +452,7 @@ class EmeraldKillfeedBot(commands.Bot):
                         self.scheduler.remove_job('unified_log_parser')
                     except:
                         pass
-                    
+
                     self.scheduler.add_job(
                         self.unified_log_parser.run_log_parser,
                         'interval',
@@ -462,11 +462,11 @@ class EmeraldKillfeedBot(commands.Bot):
                         coalesce=True
                     )
                     logger.info("📜 Unified log parser scheduled (180s interval)")
-                    
+
                     # Run initial parse
                     asyncio.create_task(self.unified_log_parser.run_log_parser())
                     logger.info("🔥 Initial unified log parser run triggered")
-                    
+
                 except Exception as e:
                     logger.error(f"Failed to schedule unified log parser: {e}")
 

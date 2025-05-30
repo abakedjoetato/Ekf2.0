@@ -581,7 +581,7 @@ class UnifiedLogParser:
         return None
 
     async def update_voice_channel(self, guild_id: str):
-        """BULLETPROOF voice channel update"""
+        """ADVANCED voice channel update with server name, counts, and queue info"""
         try:
             # Convert guild_id to int with better validation
             if isinstance(guild_id, str):
@@ -600,12 +600,19 @@ class UnifiedLogParser:
             # Count active players with better key validation
             guild_prefix = f"{guild_id}_"
             active_players = 0
+            queued_players = 0
 
             for key, session in self.player_sessions.items():
                 if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online':
                     active_players += 1
+            
+            # Count queued players (those in lifecycle but not in active sessions)
+            for key, lifecycle in self.player_lifecycle.items():
+                if key.startswith(guild_prefix):
+                    if key not in self.player_sessions or self.player_sessions[key].get('status') != 'online':
+                        queued_players += 1
 
-            logger.debug(f"Counted {active_players} active players for guild {guild_id_int}")
+            logger.debug(f"Counted {active_players} active players and {queued_players} queued for guild {guild_id_int}")
 
             # Get guild config with validation
             if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
@@ -616,6 +623,17 @@ class UnifiedLogParser:
             if not guild_config:
                 logger.debug(f"No guild config found for {guild_id_int}")
                 return
+
+            # Get server info for display
+            servers = guild_config.get('servers', [])
+            server_name = "Unknown Server"
+            max_players = 60  # Default
+            
+            if servers:
+                # Use first server's info for display (most common case is single server)
+                primary_server = servers[0]
+                server_name = primary_server.get('name', 'Server').replace(' Server', '').replace(' EU', '').replace(' US', '')
+                max_players = primary_server.get('max_players', 60)
 
             # Find voice channel ID with comprehensive mapping
             voice_channel_id = None
@@ -645,7 +663,6 @@ class UnifiedLogParser:
 
             # Method 3: Check if any servers have voice channels configured
             if not voice_channel_id:
-                servers = guild_config.get('servers', [])
                 for server in servers:
                     server_id = str(server.get('_id', ''))
                     if server_id in server_channels:
@@ -678,11 +695,45 @@ class UnifiedLogParser:
                 logger.warning(f"Channel {voice_channel_id} is not a voice channel")
                 return
 
-            new_name = f"🟢 Players Online: {active_players}"
+            # Build advanced channel name
+            status_emoji = "🟢" if active_players > 0 else "🔴"
+            queue_text = f" | Queue: {queued_players}" if queued_players > 0 else ""
+            
+            new_name = f"{status_emoji} {server_name}: {active_players}/{max_players}{queue_text}"
+            
+            # Ensure name fits Discord's 100 character limit
+            if len(new_name) > 100:
+                # Truncate server name if needed
+                max_server_name_length = 100 - len(f"{status_emoji} : {active_players}/{max_players}{queue_text}")
+                if max_server_name_length > 0:
+                    server_name = server_name[:max_server_name_length]
+                    new_name = f"{status_emoji} {server_name}: {active_players}/{max_players}{queue_text}"
+                else:
+                    # Fallback to simple format
+                    new_name = f"{status_emoji} Players: {active_players}/{max_players}"
+            
             if voice_channel.name != new_name:
                 try:
-                    await voice_channel.edit(name=new_name)
-                    logger.info(f"✅ Voice channel updated to: {new_name}")
+                    # Use advanced rate limiter for voice channel updates (highest priority)
+                    if hasattr(self.bot, 'advanced_rate_limiter'):
+                        # Create a dummy embed for the rate limiter (voice channel updates don't use embeds)
+                        dummy_embed = discord.Embed(title=f"Voice Channel Update: {new_name}")
+                        
+                        async def update_callback():
+                            await voice_channel.edit(name=new_name)
+                            logger.info(f"✅ Voice channel updated to: {new_name}")
+                        
+                        await self.bot.advanced_rate_limiter.queue_message(
+                            channel_id=voice_channel.id,
+                            embed=dummy_embed,
+                            priority=self.bot.advanced_rate_limiter.MessagePriority.CRITICAL,
+                            callback=update_callback
+                        )
+                    else:
+                        # Fallback to direct update
+                        await voice_channel.edit(name=new_name)
+                        logger.info(f"✅ Voice channel updated to: {new_name}")
+                        
                 except discord.HTTPException as e:
                     if e.status == 429:  # Rate limited
                         logger.warning(f"Rate limited updating voice channel: {e}")
@@ -770,13 +821,26 @@ class UnifiedLogParser:
                                 if os.path.exists(file_path):
                                     file_to_attach = discord.File(file_path, filename=filename)
 
-                        # Send with or without file attachment
-                        if file_to_attach:
-                            await channel.send(embed=embed, file=file_to_attach)
-                        else:
-                            await channel.send(embed=embed)
+                        # Use advanced rate limiter with priority
+                        from bot.utils.advanced_rate_limiter import MessagePriority
+                        
+                        priority = MessagePriority.NORMAL
+                        if embed.title:
+                            title_lower = embed.title.lower()
+                            if any(word in title_lower for word in ['connect', 'disconnect']):
+                                priority = MessagePriority.HIGH
+                            elif 'mission' in title_lower and 'ready' in title_lower:
+                                priority = MessagePriority.HIGH
+                        
+                        await self.bot.advanced_rate_limiter.queue_message(
+                            channel_id=channel.id,
+                            embed=embed,
+                            file=file_to_attach,
+                            priority=priority
+                        )
                             
-                        logger.info(f"✅ Sent {channel_type} event to {channel.name}")
+                        # Don't log individual sends anymore
+                        pass
                     except Exception as e:
                         logger.error(f"Failed to send embed: {e}")
 
@@ -814,7 +878,31 @@ class UnifiedLogParser:
             if not is_cold_start and embeds:
                 await self.send_embeds(guild_id, server_id, embeds)
 
-            logger.info(f"✅ {server_name}: {'Cold start' if is_cold_start else f'{len(embeds)} events'}")
+            # Log combined event summary
+            if not is_cold_start and embeds:
+                event_types = {}
+                connection_events = 0
+                for embed in embeds:
+                    if embed.title:
+                        title_lower = embed.title.lower()
+                        if any(word in title_lower for word in ['connect', 'disconnect', 'join', 'left']):
+                            connection_events += 1
+                        elif 'mission' in title_lower:
+                            event_types['missions'] = event_types.get('missions', 0) + 1
+                        elif 'airdrop' in title_lower:
+                            event_types['airdrops'] = event_types.get('airdrops', 0) + 1
+                        elif 'helicrash' in title_lower:
+                            event_types['helicrashes'] = event_types.get('helicrashes', 0) + 1
+                        elif 'trader' in title_lower:
+                            event_types['traders'] = event_types.get('traders', 0) + 1
+                
+                if connection_events:
+                    event_types['connections'] = connection_events
+                
+                event_summary = ", ".join([f"{count} {type_name}" for type_name, count in event_types.items()])
+                logger.info(f"✅ {server_name}: {len(embeds)} total events sent ({event_summary})")
+            else:
+                logger.info(f"✅ {server_name}: {'Cold start' if is_cold_start else 'No new events'}")
 
         except Exception as e:
             logger.error(f"Error parsing server {server.get('name', 'Unknown')}: {e}")
@@ -951,40 +1039,50 @@ class UnifiedLogParser:
             logger.error(f"Error resetting parser state: {e}")
 
     async def resolve_player_name(self, player_id: str, guild_id: str) -> str:
-        """Resolve player name from ID using comprehensive database and session cache"""
+        """ENHANCED player name resolution - NO UNKNOWN PLAYERS ALLOWED"""
         try:
             # Check cache first
             cache_key = f"{guild_id}_{player_id}"
             if cache_key in self.player_name_cache:
-                return self.player_name_cache[cache_key]
+                cached_name = self.player_name_cache[cache_key]
+                if not cached_name.startswith('Player_') and cached_name != 'Unknown Player':
+                    return cached_name
             
-            # Check current session lifecycle first (most recent) - this should have the actual name
+            # Method 1: Check current session lifecycle (most recent and most reliable)
             lifecycle_key = f"{guild_id}_{player_id}"
             if lifecycle_key in self.player_lifecycle:
                 name = self.player_lifecycle[lifecycle_key].get('name')
                 if name and name.strip() and name != 'Unknown Player':
-                    # Clean up the name (URL decode and normalize)
+                    # Advanced name cleaning and normalization
                     import urllib.parse
+                    import re
                     try:
-                        # URL decode the name (handles %20 for spaces, etc.)
-                        decoded_name = urllib.parse.unquote(name)
-                        # Further clean up any remaining artifacts
-                        clean_name = decoded_name.replace('+', ' ').strip()
-                        if clean_name and clean_name != 'Unknown Player':
+                        # Multiple rounds of URL decoding
+                        decoded_name = name
+                        for _ in range(3):  # Handle double/triple encoding
+                            try:
+                                new_decoded = urllib.parse.unquote(decoded_name)
+                                if new_decoded == decoded_name:
+                                    break
+                                decoded_name = new_decoded
+                            except:
+                                break
+                        
+                        # Clean up artifacts and normalize
+                        clean_name = decoded_name.replace('+', ' ').replace('%20', ' ')
+                        clean_name = re.sub(r'[^\w\s\-_\[\]().]', '', clean_name).strip()
+                        
+                        if clean_name and len(clean_name) >= 2 and clean_name != 'Unknown Player':
                             self.player_name_cache[cache_key] = clean_name
                             logger.info(f"✅ Resolved player name from lifecycle: {player_id} -> {clean_name}")
                             return clean_name
                     except Exception as decode_error:
                         logger.warning(f"Failed to decode player name '{name}': {decode_error}")
-                        # Use original name if decoding fails
-                        if name.strip():
-                            self.player_name_cache[cache_key] = name.strip()
-                            return name.strip()
             
-            # Check database with multiple methods
+            # Method 2: Enhanced database lookup with fuzzy matching
             if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
                 try:
-                    # Method 1: Check PvP data collection (most comprehensive) - search by player_id
+                    # 2a: Exact PvP data match
                     pvp_doc = await self.bot.db_manager.pvp_data.find_one({
                         'guild_id': int(guild_id),
                         'player_id': player_id
@@ -992,81 +1090,192 @@ class UnifiedLogParser:
                     
                     if pvp_doc:
                         name = pvp_doc.get('player_name')
-                        if name and name.strip() and name != 'Unknown Player':
+                        if name and name.strip() and name != 'Unknown Player' and not name.startswith('Player_'):
                             self.player_name_cache[cache_key] = name
                             logger.info(f"✅ Resolved player name from PvP data: {player_id} -> {name}")
                             return name
                     
-                    # Method 2: Search PvP data by partial player_id match (sometimes IDs change)
-                    partial_id = player_id[:8] if len(player_id) > 8 else player_id
-                    pvp_cursor = self.bot.db_manager.pvp_data.find({
+                    # 2b: Multiple partial ID matching strategies
+                    for prefix_length in [12, 8, 6, 4]:
+                        if len(player_id) >= prefix_length:
+                            partial_id = player_id[:prefix_length]
+                            pvp_cursor = self.bot.db_manager.pvp_data.find({
+                                'guild_id': int(guild_id),
+                                'player_id': {'$regex': f'^{partial_id}', '$options': 'i'}
+                            }).sort('last_updated', -1).limit(5)
+                            
+                            async for pvp_doc in pvp_cursor:
+                                name = pvp_doc.get('player_name')
+                                if name and name.strip() and name != 'Unknown Player' and not name.startswith('Player_'):
+                                    self.player_name_cache[cache_key] = name
+                                    logger.info(f"✅ Resolved player name from partial ID ({prefix_length}): {player_id} -> {name}")
+                                    # Update record with full player_id
+                                    try:
+                                        await self.bot.db_manager.pvp_data.update_one(
+                                            {'_id': pvp_doc['_id']},
+                                            {'$set': {'player_id': player_id, 'last_updated': datetime.now(timezone.utc)}}
+                                        )
+                                    except:
+                                        pass
+                                    return name
+                    
+                    # 2c: Check all recent PvP activity (last 7 days) for pattern matching
+                    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+                    recent_cursor = self.bot.db_manager.pvp_data.find({
                         'guild_id': int(guild_id),
-                        'player_id': {'$regex': f'^{partial_id}', '$options': 'i'}
-                    }).sort('last_updated', -1).limit(1)
+                        'last_updated': {'$gte': week_ago},
+                        'player_name': {'$exists': True, '$ne': None}
+                    }).sort('last_updated', -1).limit(100)
                     
-                    async for pvp_doc in pvp_cursor:
-                        name = pvp_doc.get('player_name')
-                        if name and name.strip() and name != 'Unknown Player':
-                            self.player_name_cache[cache_key] = name
-                            logger.info(f"✅ Resolved player name from partial ID match: {player_id} -> {name}")
-                            # Update the record with correct player_id
-                            try:
-                                await self.bot.db_manager.pvp_data.update_one(
-                                    {'_id': pvp_doc['_id']},
-                                    {'$set': {'player_id': player_id}}
-                                )
-                            except:
-                                pass
-                            return name
+                    async for pvp_doc in recent_cursor:
+                        doc_player_id = pvp_doc.get('player_id', '')
+                        name = pvp_doc.get('player_name', '')
+                        
+                        # Check for similar player IDs (common prefix/suffix patterns)
+                        if doc_player_id and name and not name.startswith('Player_'):
+                            similarity_score = 0
+                            # Check common prefix
+                            common_prefix = 0
+                            for i in range(min(len(player_id), len(doc_player_id))):
+                                if player_id[i] == doc_player_id[i]:
+                                    common_prefix += 1
+                                else:
+                                    break
+                            
+                            if common_prefix >= 8:  # Strong similarity
+                                self.player_name_cache[cache_key] = name
+                                logger.info(f"✅ Resolved player name from similar ID: {player_id} -> {name} (similarity: {common_prefix})")
+                                return name
                     
-                    # Method 3: Check linked players table
+                    # 2d: Check linked players with expanded search
                     player_doc = await self.bot.db_manager.players.find_one({
                         'guild_id': int(guild_id),
                         'player_id': player_id
                     })
                     
                     if player_doc:
-                        # Use primary character or first linked character
                         name = player_doc.get('primary_character') or (player_doc.get('linked_characters', [None])[0])
                         if name and name.strip() and name != 'Unknown Player':
                             self.player_name_cache[cache_key] = name
                             logger.info(f"✅ Resolved player name from linked players: {player_id} -> {name}")
                             return name
                     
-                    # Method 4: Check if player has ever been linked to Discord by searching characters
-                    linked_cursor = self.bot.db_manager.players.find({
+                    # 2e: Cross-reference with kill events in the last 24 hours
+                    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+                    kill_cursor = self.bot.db_manager.kill_events.find({
                         'guild_id': int(guild_id),
-                        'linked_characters': {'$exists': True, '$ne': []}
-                    })
+                        'timestamp': {'$gte': yesterday},
+                        '$or': [
+                            {'killer_id': player_id},
+                            {'victim_id': player_id}
+                        ]
+                    }).sort('timestamp', -1).limit(10)
                     
-                    async for linked_doc in linked_cursor:
-                        # Try to find this player_id in historical data for any of these characters
-                        for char_name in linked_doc.get('linked_characters', []):
-                            historical_doc = await self.bot.db_manager.pvp_data.find_one({
-                                'guild_id': int(guild_id),
-                                'player_name': char_name,
-                                'player_id': player_id
-                            })
-                            if historical_doc:
-                                self.player_name_cache[cache_key] = char_name
-                                logger.info(f"✅ Resolved player name from historical data: {player_id} -> {char_name}")
-                                return char_name
+                    async for kill_event in kill_cursor:
+                        if kill_event.get('killer_id') == player_id:
+                            name = kill_event.get('killer')
+                        elif kill_event.get('victim_id') == player_id:
+                            name = kill_event.get('victim')
+                        else:
+                            continue
+                        
+                        if name and name.strip() and name != 'Unknown Player' and not name.startswith('Player_'):
+                            self.player_name_cache[cache_key] = name
+                            logger.info(f"✅ Resolved player name from kill events: {player_id} -> {name}")
+                            return name
                             
                 except Exception as db_error:
                     logger.error(f"Database lookup failed for player {player_id}: {db_error}")
             
-            # Final fallback: Use truncated player ID as name hint but make it more obvious it's a fallback
-            if len(player_id) >= 8:
-                fallback_name = f"Player_{player_id[:8]}"
-                logger.warning(f"⚠️ Using fallback name {fallback_name} for player {player_id} - name not found in logs or database")
-                return fallback_name
+            # Method 3: Check other active sessions for similar player IDs
+            for session_key, session in self.player_sessions.items():
+                if session_key.startswith(f"{guild_id}_") and session.get('status') == 'online':
+                    session_player_id = session.get('player_id', '')
+                    session_player_name = session.get('player_name', '')
+                    
+                    if session_player_id and session_player_name and not session_player_name.startswith('Player_'):
+                        # Check for ID similarity (they might be similar players)
+                        if len(session_player_id) >= 8 and len(player_id) >= 8:
+                            if session_player_id[:8] == player_id[:8]:
+                                # Very similar IDs, might be same player with ID variation
+                                logger.info(f"✅ Resolved player name from similar session: {player_id} -> {session_player_name}")
+                                self.player_name_cache[cache_key] = session_player_name
+                                return session_player_name
             
-            logger.warning(f"⚠️ Could not resolve player name for {player_id} - returning Unknown Player")
-            return "Unknown Player"
+            # Method 4: Last resort - create a meaningful temporary name and try to resolve later
+            # Generate a more user-friendly temporary name
+            if len(player_id) >= 8:
+                # Use a combination of prefix and suffix for better uniqueness
+                prefix = player_id[:4].upper()
+                suffix = player_id[-4:].upper()
+                temp_name = f"Player{prefix}{suffix}"
+                
+                # Store in cache but mark it as temporary
+                self.player_name_cache[cache_key] = temp_name
+                
+                # Schedule a delayed lookup attempt
+                asyncio.create_task(self._delayed_name_resolution(player_id, guild_id, cache_key))
+                
+                logger.warning(f"⚠️ Using temporary name {temp_name} for player {player_id} - scheduling delayed resolution")
+                return temp_name
+            
+            # Absolute fallback
+            logger.error(f"❌ CRITICAL: Could not resolve player name for {player_id} in any way")
+            return f"Player{player_id[:8].upper()}" if len(player_id) >= 8 else "UnknownPlayer"
             
         except Exception as e:
-            logger.error(f"Error resolving player name for {player_id}: {e}")
-            return "Unknown Player"
+            logger.error(f"Error in enhanced player name resolution for {player_id}: {e}")
+            return f"Player{player_id[:8].upper()}" if len(player_id) >= 8 else "UnknownPlayer"
+
+    async def _delayed_name_resolution(self, player_id: str, guild_id: str, cache_key: str):
+        """Attempt to resolve player name after a delay (when more data might be available)"""
+        try:
+            # Wait 30 seconds for potential database updates
+            await asyncio.sleep(30)
+            
+            # Try resolution again with database priority
+            if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
+                # Check if player has appeared in recent PvP data
+                pvp_doc = await self.bot.db_manager.pvp_data.find_one({
+                    'guild_id': int(guild_id),
+                    'player_id': player_id
+                })
+                
+                if pvp_doc:
+                    name = pvp_doc.get('player_name')
+                    if name and name.strip() and not name.startswith('Player_'):
+                        self.player_name_cache[cache_key] = name
+                        logger.info(f"✅ Delayed resolution successful: {player_id} -> {name}")
+                        return
+                
+                # Check recent kill events again
+                recent = datetime.now(timezone.utc) - timedelta(minutes=10)
+                kill_cursor = self.bot.db_manager.kill_events.find({
+                    'guild_id': int(guild_id),
+                    'timestamp': {'$gte': recent},
+                    '$or': [
+                        {'killer_id': player_id},
+                        {'victim_id': player_id}
+                    ]
+                }).sort('timestamp', -1).limit(5)
+                
+                async for kill_event in kill_cursor:
+                    if kill_event.get('killer_id') == player_id:
+                        name = kill_event.get('killer')
+                    elif kill_event.get('victim_id') == player_id:
+                        name = kill_event.get('victim')
+                    else:
+                        continue
+                    
+                    if name and name.strip() and not name.startswith('Player_'):
+                        self.player_name_cache[cache_key] = name
+                        logger.info(f"✅ Delayed resolution from kills: {player_id} -> {name}")
+                        return
+            
+            logger.debug(f"Delayed resolution failed for {player_id} - keeping temporary name")
+            
+        except Exception as e:
+            logger.error(f"Error in delayed name resolution: {e}")
 
     def get_active_player_count(self, guild_id: str) -> int:
         """Get active player count for a guild"""
