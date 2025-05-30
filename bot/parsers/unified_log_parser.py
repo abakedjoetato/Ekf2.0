@@ -771,18 +771,29 @@ class UnifiedLogParser:
             return None
 
     async def send_embeds(self, guild_id: int, server_id: str, embeds: List[discord.Embed]):
-        """Send embeds to appropriate channels"""
+        """Send embeds to appropriate channels with proper file attachments"""
         if not embeds:
             return
 
         try:
             for embed in embeds:
-                # Determine channel type
+                # Determine channel type and embed type
                 channel_type = 'events'
+                embed_type = 'general'
+                
                 if embed.title:
                     title_lower = embed.title.lower()
                     if any(word in title_lower for word in ['connect', 'disconnect', 'join', 'left']):
                         channel_type = 'connections'
+                        embed_type = 'connection'
+                    elif 'mission' in title_lower:
+                        embed_type = 'mission'
+                    elif 'airdrop' in title_lower:
+                        embed_type = 'airdrop'
+                    elif 'helicrash' in title_lower or 'helicopter' in title_lower:
+                        embed_type = 'helicrash'
+                    elif 'trader' in title_lower:
+                        embed_type = 'trader'
 
                 # Get channel
                 channel_id = await self.get_channel_for_type(guild_id, server_id, channel_type)
@@ -792,9 +803,34 @@ class UnifiedLogParser:
                 channel = self.bot.get_channel(channel_id)
                 if channel:
                     try:
-                        # Use advanced rate limiter with priority for embeds
-                        from bot.utils.advanced_rate_limiter import MessagePriority
+                        # Build proper embed with attachment using EmbedFactory
+                        embed_data = {
+                            'title': embed.title,
+                            'description': embed.description,
+                            'mission_id': '',
+                            'level': 1,
+                            'state': 'UNKNOWN',
+                            'player_name': 'Unknown',
+                            'player_id': 'Unknown',
+                            'location': 'Unknown'
+                        }
                         
+                        # Extract data from embed fields if available
+                        for field in embed.fields:
+                            if field.name.lower() == 'mission':
+                                embed_data['mission_id'] = field.value
+                            elif field.name.lower() == 'player':
+                                embed_data['player_name'] = field.value
+                            elif field.name.lower() == 'location':
+                                embed_data['location'] = field.value
+                            elif field.name.lower() == 'status':
+                                embed_data['state'] = field.value.upper()
+
+                        # Use EmbedFactory to build with proper attachment
+                        final_embed, file_attachment = await EmbedFactory.build(embed_type, embed_data)
+                        
+                        # Set priority for rate limiter
+                        from bot.utils.advanced_rate_limiter import MessagePriority
                         priority = MessagePriority.NORMAL
                         if embed.title:
                             title_lower = embed.title.lower()
@@ -803,16 +839,21 @@ class UnifiedLogParser:
                             elif 'mission' in title_lower and 'ready' in title_lower:
                                 priority = MessagePriority.HIGH
                         
-                        # Use advanced rate limiter if available, otherwise fallback to direct send
+                        # Send with rate limiter if available
                         if hasattr(self.bot, 'advanced_rate_limiter'):
                             await self.bot.advanced_rate_limiter.queue_message(
                                 channel_id=channel.id,
-                                embed=embed,
+                                embed=final_embed,
+                                file=file_attachment,
                                 priority=priority
                             )
                         else:
                             # Fallback to direct send
-                            await channel.send(embed=embed)
+                            if file_attachment:
+                                await channel.send(embed=final_embed, file=file_attachment)
+                            else:
+                                await channel.send(embed=final_embed)
+                                
                     except Exception as e:
                         logger.error(f"Failed to send embed: {e}")
 

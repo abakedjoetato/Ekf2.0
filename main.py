@@ -193,14 +193,30 @@ class EmeraldKillfeedBot(commands.Bot):
     def calculate_command_fingerprint(self, commands):
         """Generates a stable hash for the current command structure."""
         try:
-            command_data = sorted([
-                {
+            command_data = []
+            for c in commands:
+                cmd_dict = {
                     'name': c.name,
                     'description': c.description,
-                    'options': getattr(c, 'options', None)
                 }
-                for c in commands
-            ], key=lambda x: x['name'])
+                # Handle options safely by converting to basic types
+                if hasattr(c, 'options') and c.options:
+                    options_data = []
+                    for opt in c.options:
+                        opt_dict = {
+                            'name': getattr(opt, 'name', ''),
+                            'description': getattr(opt, 'description', ''),
+                            'type': str(getattr(opt, 'type', '')),
+                            'required': getattr(opt, 'required', False)
+                        }
+                        options_data.append(opt_dict)
+                    cmd_dict['options'] = options_data
+                else:
+                    cmd_dict['options'] = []
+                command_data.append(cmd_dict)
+            
+            # Sort by name for consistent hashing
+            command_data = sorted(command_data, key=lambda x: x['name'])
             return hashlib.sha256(json.dumps(command_data, sort_keys=True).encode()).hexdigest()
         except Exception as e:
             logger.error(f"Failed to calculate command fingerprint: {e}")
