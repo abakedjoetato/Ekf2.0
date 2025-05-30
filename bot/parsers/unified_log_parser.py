@@ -295,12 +295,17 @@ class UnifiedLogParser:
         }
         await self._save_persistent_state()
 
-        # Track voice channel updates needed
+        # Track voice channel updates needed and player events for sequential processing
         voice_channel_needs_update = False
+        player_events = []
 
-        # Process lines
+        # First pass: collect all player events with timestamps for sequential processing
         for line in lines_to_process:
             try:
+                # Extract timestamp from line for ordering
+                timestamp_match = self.patterns['timestamp'].search(line)
+                line_timestamp = timestamp_match.group(1) if timestamp_match else None
+
                 # Player connection events
                 queue_match = self.patterns['player_queue_join'].search(line)
                 if queue_match:
@@ -326,6 +331,34 @@ class UnifiedLogParser:
                 register_match = self.patterns['player_registered'].search(line)
                 if register_match:
                     player_id = register_match.group(1)
+                    player_events.append({
+                        'type': 'connect',
+                        'player_id': player_id,
+                        'timestamp': line_timestamp,
+                        'line': line
+                    })
+
+                disconnect_match = self.patterns['player_disconnect'].search(line)
+                if disconnect_match:
+                    player_id = disconnect_match.group(1)
+                    player_events.append({
+                        'type': 'disconnect',
+                        'player_id': player_id,
+                        'timestamp': line_timestamp,
+                        'line': line
+                    })
+
+            except Exception as e:
+                logger.error(f"Error collecting player events from line: {e}")
+                continue
+
+        # Process player events in chronological order
+        player_events.sort(key=lambda x: x['timestamp'] if x['timestamp'] else '')
+        
+        for event in player_events:
+            try:
+                if event['type'] == 'connect':
+                    player_id = event['player_id']
                     player_key = f"{guild_id}_{player_id}"
 
                     # Resolve player name using advanced resolution
@@ -354,9 +387,8 @@ class UnifiedLogParser:
                         )
                         embeds.append(embed)
 
-                disconnect_match = self.patterns['player_disconnect'].search(line)
-                if disconnect_match:
-                    player_id = disconnect_match.group(1)
+                elif event['type'] == 'disconnect':
+                    player_id = event['player_id']
                     session_key = f"{guild_id}_{player_id}"
 
                     # Resolve player name using advanced resolution
@@ -382,6 +414,14 @@ class UnifiedLogParser:
                             server_name=server_name
                         )
                         embeds.append(embed)
+
+            except Exception as e:
+                logger.error(f"Error processing player event: {e}")
+                continue
+
+        # Second pass: process non-player events
+        for line in lines_to_process:
+            try:
 
                 # Mission events - ONLY READY missions of level 3+
                 mission_match = self.patterns['mission_state_change'].search(line)
