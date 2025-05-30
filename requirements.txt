@@ -87,3 +87,13 @@ paramiko
 py-cord==2.6.1
 pymongo
 python-dotenv
+aiofiles
+aiohttp
+apscheduler
+asyncssh
+flask
+motor
+paramiko
+py-cord==2.6.1
+pymongo
+python-dotenv
