@@ -295,6 +295,9 @@ class UnifiedLogParser:
         }
         await self._save_persistent_state()
 
+        # Track voice channel updates needed
+        voice_channel_needs_update = False
+
         # Process lines
         for line in lines_to_process:
             try:
@@ -337,8 +340,8 @@ class UnifiedLogParser:
                         'status': 'online'
                     }
 
-                    # Update voice channel
-                    await self.update_voice_channel(str(guild_id))
+                    # Mark voice channel for update
+                    voice_channel_needs_update = True
 
                     # Create embed (only if not cold start)
                     if not cold_start:
@@ -366,8 +369,8 @@ class UnifiedLogParser:
                         # Try to resolve from database if not in current session
                         player_name = await self.resolve_player_name(player_id, guild_id)
 
-                    # Update voice channel
-                    await self.update_voice_channel(str(guild_id))
+                    # Mark voice channel for update
+                    voice_channel_needs_update = True
 
                     # Create embed (only if not cold start)
                     if not cold_start:
@@ -438,6 +441,10 @@ class UnifiedLogParser:
             except Exception as e:
                 logger.error(f"Error processing line: {e}")
                 continue
+
+        # Update voice channel once at the end if needed
+        if voice_channel_needs_update:
+            await self.update_voice_channel(str(guild_id))
 
         if not cold_start:
             logger.info(f"🔍 Generated {len(embeds)} events")
