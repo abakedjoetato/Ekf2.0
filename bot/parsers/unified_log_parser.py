@@ -714,28 +714,9 @@ class UnifiedLogParser:
             
             if voice_channel.name != new_name:
                 try:
-                    # Use advanced rate limiter for voice channel updates (highest priority)
-                    if hasattr(self.bot, 'advanced_rate_limiter'):
-                        # Import MessagePriority locally
-                        from bot.utils.advanced_rate_limiter import MessagePriority
-                        
-                        # Create a dummy embed for the rate limiter (voice channel updates don't use embeds)
-                        dummy_embed = discord.Embed(title=f"Voice Channel Update: {new_name}")
-                        
-                        async def update_callback():
-                            await voice_channel.edit(name=new_name)
-                            logger.info(f"✅ Voice channel updated to: {new_name}")
-                        
-                        await self.bot.advanced_rate_limiter.queue_message(
-                            channel_id=voice_channel.id,
-                            embed=dummy_embed,
-                            priority=MessagePriority.CRITICAL,
-                            callback=update_callback
-                        )
-                    else:
-                        # Fallback to direct update
-                        await voice_channel.edit(name=new_name)
-                        logger.info(f"✅ Voice channel updated to: {new_name}")
+                    # Direct voice channel update - no rate limiter needed for voice channels
+                    await voice_channel.edit(name=new_name)
+                    logger.info(f"✅ Voice channel updated to: {new_name}")
                         
                 except discord.HTTPException as e:
                     if e.status == 429:  # Rate limited
@@ -811,20 +792,7 @@ class UnifiedLogParser:
                 channel = self.bot.get_channel(channel_id)
                 if channel:
                     try:
-                        # Determine which thumbnail file to attach based on embed content
-                        file_to_attach = None
-                        if embed.thumbnail and embed.thumbnail.url:
-                            thumbnail_url = embed.thumbnail.url
-                            if thumbnail_url.startswith('attachment://'):
-                                filename = thumbnail_url.replace('attachment://', '')
-                                file_path = f'./assets/{filename}'
-                                
-                                # Check if file exists and create discord.File
-                                import os
-                                if os.path.exists(file_path):
-                                    file_to_attach = discord.File(file_path, filename=filename)
-
-                        # Use advanced rate limiter with priority
+                        # Use advanced rate limiter with priority for embeds
                         from bot.utils.advanced_rate_limiter import MessagePriority
                         
                         priority = MessagePriority.NORMAL
@@ -840,15 +808,11 @@ class UnifiedLogParser:
                             await self.bot.advanced_rate_limiter.queue_message(
                                 channel_id=channel.id,
                                 embed=embed,
-                                file=file_to_attach,
                                 priority=priority
                             )
                         else:
                             # Fallback to direct send
-                            await channel.send(embed=embed, file=file_to_attach)
-                            
-                        # Don't log individual sends anymore
-                        pass
+                            await channel.send(embed=embed)
                     except Exception as e:
                         logger.error(f"Failed to send embed: {e}")
 

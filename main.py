@@ -190,126 +190,139 @@ class EmeraldKillfeedBot(commands.Bot):
             logger.error(f"Load cogs traceback: {traceback.format_exc()}")
             return False
 
+    def calculate_command_fingerprint(self, commands):
+        """Generates a stable hash for the current command structure."""
+        try:
+            command_data = sorted([
+                {
+                    'name': c.name,
+                    'description': c.description,
+                    'options': getattr(c, 'options', None)
+                }
+                for c in commands
+            ], key=lambda x: x['name'])
+            return hashlib.sha256(json.dumps(command_data, sort_keys=True).encode()).hexdigest()
+        except Exception as e:
+            logger.error(f"Failed to calculate command fingerprint: {e}")
+            return None
+
     async def register_commands_safely(self):
         """
-        ADVANCED Command Sync Logic - Global with Guild Fallback
-        Implements requirements: global sync first, then per-guild fallback on failure
+        Production-ready sync logic:
+        - Avoids redundant syncs with command fingerprinting
+        - Caches command hash to prevent unnecessary syncs
+        - Falls back to per-guild on global sync failure
+        - Applies intelligent rate limit cooldowns
         """
         try:
-            # Try multiple attributes to find commands
-            command_count = 0
-            commands_source = "none"
-            command_names = []
-
+            # Get all commands
+            all_commands = []
             if hasattr(self, 'application_commands') and self.application_commands:
-                command_count = len(self.application_commands)
-                command_names = [cmd.name for cmd in self.application_commands]
-                commands_source = "application_commands"
+                all_commands = list(self.application_commands)
             elif hasattr(self, 'pending_application_commands') and self.pending_application_commands:
-                command_count = len(self.pending_application_commands)
-                command_names = [cmd.name for cmd in self.pending_application_commands]
-                commands_source = "pending_application_commands"
-            elif hasattr(self, 'slash_commands') and self.slash_commands:
-                command_count = len(self.slash_commands)
-                command_names = [cmd.name for cmd in self.slash_commands]
-                commands_source = "slash_commands"
+                all_commands = list(self.pending_application_commands)
 
-            logger.info(f"📊 {command_count} commands found via {commands_source}")
-
-            # Debug: Show actual command names
-            if command_count > 0:
-                logger.info(f"🔍 Commands to sync: {', '.join(command_names[:10])}{'...' if len(command_names) > 10 else ''}")
-            else:
-                # Debug all available attributes
-                attrs = [attr for attr in dir(self) if 'command' in attr.lower()]
-                logger.warning(f"🔍 Available command attributes: {attrs}")
-                logger.warning("⚠️ No commands to sync - this may indicate a cog loading issue")
+            if not all_commands:
+                logger.warning("⚠️ No commands found for syncing")
                 return
 
-            # Check for existing rate limit
-            rate_limit_file = "rate_limit_cooldown.txt"
-            if os.path.exists(rate_limit_file):
+            # Calculate current command fingerprint
+            current_fingerprint = self.calculate_command_fingerprint(all_commands)
+            if not current_fingerprint:
+                logger.error("❌ Failed to calculate command fingerprint")
+                return
+
+            hash_file = "command_hash.txt"
+            cooldown_file = "command_sync_cooldown.txt"
+            cooldown_secs = 1800  # 30 minutes
+
+            # Check for rate-limit cooldown
+            if os.path.exists(cooldown_file):
                 try:
-                    with open(rate_limit_file, 'r') as f:
-                        cooldown_until = float(f.read().strip())
-                        if time.time() < cooldown_until:
-                            remaining = int(cooldown_until - time.time())
-                            logger.warning(f"⏳ Rate limit active for {remaining}s - skipping sync")
+                    with open(cooldown_file, 'r') as f:
+                        until = float(f.read().strip())
+                        if time.time() < until:
+                            remaining = int(until - time.time())
+                            logger.warning(f"⏳ Command sync on cooldown for {remaining}s. Skipping.")
                             return
                         else:
-                            os.remove(rate_limit_file)
+                            os.remove(cooldown_file)
                             logger.info("✅ Rate limit cooldown expired")
-                except:
+                except Exception:
                     pass
 
-            # STEP 1: Try global sync first (per requirements)
-            logger.info(f"🌍 Attempting GLOBAL command sync...")
-            try:
-                await asyncio.wait_for(self.sync_commands(), timeout=30)
-                logger.info(f"✅ GLOBAL SYNC SUCCESSFUL - All guilds updated instantly")
+            # Check for command changes
+            old_fingerprint = None
+            if os.path.exists(hash_file):
+                try:
+                    with open(hash_file, 'r') as f:
+                        old_fingerprint = f.read().strip()
+                except Exception:
+                    pass
 
-                # Save success marker
+            # Force sync override for development
+            force_sync = os.getenv('FORCE_SYNC', 'false').lower() == 'true'
+
+            if current_fingerprint == old_fingerprint and not force_sync:
+                logger.info("✅ No command changes detected. Skipping sync.")
+                return
+
+            logger.info(f"🔄 Command structure changed - syncing {len(all_commands)} commands")
+
+            # Attempt global sync
+            try:
+                logger.info("🌍 Performing global command sync...")
+                await asyncio.wait_for(self.sync_commands(), timeout=30)
+                logger.info("✅ Global sync complete")
+                
+                # Save successful fingerprint
+                with open(hash_file, 'w') as f:
+                    f.write(current_fingerprint)
                 with open("global_sync_success.txt", 'w') as f:
                     f.write(str(time.time()))
                 return
 
-            except asyncio.TimeoutError:
-                logger.warning("⏰ Global sync timed out - proceeding to guild fallback")
             except Exception as e:
                 error_msg = str(e).lower()
-                if "rate limited" in error_msg or "429" in error_msg:
-                    logger.error(f"❌ Global sync rate limited: {e}")
-
-                    # Extract retry time and save cooldown for future attempts
-                    retry_match = re.search(r'Retrying in ([\d.]+) seconds', str(e))
-                    if retry_match:
-                        retry_time = float(retry_match.group(1))
-                        cooldown_until = time.time() + retry_time + 60
-                        with open(rate_limit_file, 'w') as f:
-                            f.write(str(cooldown_until))
-                        logger.error(f"💾 Rate limit cooldown saved for {retry_time + 60}s")
-
-                    # Continue to guild fallback instead of returning
-                    logger.info("🏠 Global sync rate limited - proceeding to guild fallback")
+                if "429" in error_msg or "rate limit" in error_msg:
+                    logger.warning(f"❌ Global sync rate limited: {e}")
+                    # Set cooldown
+                    with open(cooldown_file, 'w') as f:
+                        f.write(str(time.time() + cooldown_secs))
                 else:
-                    logger.warning(f"⚠️ Global sync failed: {e} - proceeding to guild fallback")
+                    logger.warning(f"⚠️ Global sync failed: {e}")
 
-            # STEP 2: Guild-specific fallback (per requirements)
-            logger.info(f"🏠 Attempting PER-GUILD sync fallback for {len(self.guilds)} guilds...")
+            # Per-guild fallback
+            logger.info(f"🏠 Performing per-guild sync fallback for {len(self.guilds)} guilds...")
             success_count = 0
-            rate_limited = False
-
+            
             for guild in self.guilds:
-                if rate_limited:
-                    break
-
                 try:
-                    # Use py-cord specific guild sync method with guild_ids parameter
                     await asyncio.wait_for(self.sync_commands(guild_ids=[guild.id]), timeout=15)
                     success_count += 1
-                    logger.info(f"✅ GUILD SYNC SUCCESSFUL: {guild.name}")
-
-                    # Small delay between guild syncs to avoid rate limits
-                    if success_count < len(self.guilds):
-                        await asyncio.sleep(3)
-
-                except Exception as guild_error:
-                    error_msg = str(guild_error).lower()
-                    if "rate limited" in error_msg or "429" in error_msg:
-                        logger.error(f"❌ Guild sync rate limited for {guild.name}")
-                        rate_limited = True
+                    logger.info(f"✅ Guild sync: {guild.name}")
+                    await asyncio.sleep(1.5)  # Rate limit prevention
+                    
+                except Exception as ge:
+                    error_msg = str(ge).lower()
+                    if "429" in error_msg or "rate limit" in error_msg:
+                        logger.warning(f"🛑 Hit rate limit on guild sync - halting further syncs.")
+                        with open(cooldown_file, 'w') as f:
+                            f.write(str(time.time() + cooldown_secs))
                         break
                     else:
-                        logger.warning(f"⚠️ Guild sync failed for {guild.name}: {guild_error}")
+                        logger.warning(f"❌ Guild sync failed for {guild.name}: {ge}")
 
             if success_count > 0:
-                logger.info(f"✅ GUILD FALLBACK COMPLETED: {success_count}/{len(self.guilds)} successful")
-                return
+                # Save successful fingerprint even on partial success
+                with open(hash_file, 'w') as f:
+                    f.write(current_fingerprint)
+                logger.info(f"✅ Per-guild sync completed: {success_count}/{len(self.guilds)} successful")
             else:
-                logger.warning("⚠️ ALL SYNC METHODS FAILED - Commands will sync on next restart")
+                logger.warning("⚠️ All sync methods failed")
 
         except Exception as e:
-            logger.error(f"❌ Command sync system failed: {e}")
+            logger.error(f"❌ Command sync logic failed: {e}")
             import traceback
             logger.error(f"Sync traceback: {traceback.format_exc()}")
 
