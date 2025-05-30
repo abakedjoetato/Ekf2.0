@@ -716,6 +716,9 @@ class UnifiedLogParser:
                 try:
                     # Use advanced rate limiter for voice channel updates (highest priority)
                     if hasattr(self.bot, 'advanced_rate_limiter'):
+                        # Import MessagePriority locally
+                        from bot.utils.advanced_rate_limiter import MessagePriority
+                        
                         # Create a dummy embed for the rate limiter (voice channel updates don't use embeds)
                         dummy_embed = discord.Embed(title=f"Voice Channel Update: {new_name}")
                         
@@ -726,7 +729,7 @@ class UnifiedLogParser:
                         await self.bot.advanced_rate_limiter.queue_message(
                             channel_id=voice_channel.id,
                             embed=dummy_embed,
-                            priority=self.bot.advanced_rate_limiter.MessagePriority.CRITICAL,
+                            priority=MessagePriority.CRITICAL,
                             callback=update_callback
                         )
                     else:
@@ -832,12 +835,17 @@ class UnifiedLogParser:
                             elif 'mission' in title_lower and 'ready' in title_lower:
                                 priority = MessagePriority.HIGH
                         
-                        await self.bot.advanced_rate_limiter.queue_message(
-                            channel_id=channel.id,
-                            embed=embed,
-                            file=file_to_attach,
-                            priority=priority
-                        )
+                        # Use advanced rate limiter if available, otherwise fallback to direct send
+                        if hasattr(self.bot, 'advanced_rate_limiter'):
+                            await self.bot.advanced_rate_limiter.queue_message(
+                                channel_id=channel.id,
+                                embed=embed,
+                                file=file_to_attach,
+                                priority=priority
+                            )
+                        else:
+                            # Fallback to direct send
+                            await channel.send(embed=embed, file=file_to_attach)
                             
                         # Don't log individual sends anymore
                         pass

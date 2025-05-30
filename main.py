@@ -363,11 +363,15 @@ class EmeraldKillfeedBot(commands.Bot):
             from bot.utils.batch_sender import BatchSender
             self.batch_sender = BatchSender(self)
 
+            # Initialize advanced rate limiter
+            from bot.utils.advanced_rate_limiter import AdvancedRateLimiter
+            self.advanced_rate_limiter = AdvancedRateLimiter(self)
+
             # Initialize parsers (PHASE 2) - Data parsers for killfeed & log events
             self.killfeed_parser = KillfeedParser(self)
             self.historical_parser = HistoricalParser(self)
             self.unified_log_parser = UnifiedLogParser(self)
-            logger.info("Parsers initialized (PHASE 2) + Unified Log Parser + Batch Sender")
+            logger.info("Parsers initialized (PHASE 2) + Unified Log Parser + Advanced Rate Limiter + Batch Sender")
 
             return True
 
@@ -510,6 +514,11 @@ class EmeraldKillfeedBot(commands.Bot):
         # Clean up SFTP connections
         await self.cleanup_connections()
 
+        # Flush advanced rate limiter if it exists
+        if hasattr(self, 'advanced_rate_limiter'):
+            await self.advanced_rate_limiter.flush_all_queues()
+            logger.info("Advanced rate limiter flushed")
+
         if self.scheduler.running:
             self.scheduler.shutdown()
             logger.info("Scheduler stopped")
@@ -529,6 +538,12 @@ class EmeraldKillfeedBot(commands.Bot):
                 logger.info("Flushing remaining batched messages...")
                 await self.batch_sender.flush_all_queues()
                 logger.info("Batch sender flushed")
+
+            # Flush advanced rate limiter
+            if hasattr(self, 'advanced_rate_limiter'):
+                logger.info("Flushing advanced rate limiter...")
+                await self.advanced_rate_limiter.flush_all_queues()
+                logger.info("Advanced rate limiter flushed")
 
             # Clean up SFTP connections
             await self.cleanup_connections()
