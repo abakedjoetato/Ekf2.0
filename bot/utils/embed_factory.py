@@ -6,7 +6,8 @@ Professional, esports-adjacent dark-themed formatting for all embeds
 import discord
 import random
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Tuple
 
 
 class EmbedFactory:
@@ -326,3 +327,141 @@ class EmbedFactory:
         embed.add_field(name="Faction", value=faction_name, inline=True)
 
         return embed
+
+    @classmethod
+    def create_suicide_embed(cls, player_name: str, cause: str, **kwargs) -> discord.Embed:
+        """Create suicide embed"""
+        embed = cls.build_base_embed(
+            "Player Death",
+            f"{player_name} died by {cause}",
+            cls.COLORS['neutral'],
+            'main'
+        )
+        embed.add_field(name="Player", value=player_name, inline=True)
+        embed.add_field(name="Cause", value=cause, inline=True)
+        return embed
+
+    @classmethod
+    def create_fall_embed(cls, player_name: str, **kwargs) -> discord.Embed:
+        """Create falling death embed"""
+        embed = cls.build_base_embed(
+            "Fall Death",
+            f"{player_name} died from falling",
+            cls.COLORS['warning'],
+            'main'
+        )
+        embed.add_field(name="Player", value=player_name, inline=True)
+        embed.add_field(name="Cause", value="Falling Damage", inline=True)
+        return embed
+
+    @classmethod
+    async def build(cls, embed_type: str, embed_data: Dict[str, Any]) -> Tuple[discord.Embed, Optional[discord.File]]:
+        """
+        Main build method that creates embeds and handles file attachments
+        """
+        embed = None
+        file_attachment = None
+
+        try:
+            if embed_type == 'killfeed':
+                embed = cls.create_killfeed_embed(
+                    killer_name=embed_data.get('killer_name', 'Unknown'),
+                    victim_name=embed_data.get('victim_name', 'Unknown'),
+                    weapon=embed_data.get('weapon', 'Unknown'),
+                    distance=float(embed_data.get('distance', 0)) if embed_data.get('distance') else None
+                )
+                # Attach killfeed image
+                killfeed_path = Path('./assets/Killfeed.png')
+                if killfeed_path.exists():
+                    file_attachment = discord.File(killfeed_path, filename='Killfeed.png')
+
+            elif embed_type == 'suicide':
+                embed = cls.create_suicide_embed(
+                    player_name=embed_data.get('player_name', 'Unknown'),
+                    cause=embed_data.get('cause', 'Unknown')
+                )
+                # Attach suicide image
+                suicide_path = Path('./assets/Suicide.png')
+                if suicide_path.exists():
+                    file_attachment = discord.File(suicide_path, filename='Suicide.png')
+
+            elif embed_type == 'fall':
+                embed = cls.create_fall_embed(
+                    player_name=embed_data.get('player_name', 'Unknown')
+                )
+                # Attach falling image
+                falling_path = Path('./assets/Falling.png')
+                if falling_path.exists():
+                    file_attachment = discord.File(falling_path, filename='Falling.png')
+
+            elif embed_type == 'mission':
+                embed = cls.create_mission_embed(
+                    title=embed_data.get('title', 'Mission Update'),
+                    description=embed_data.get('description', ''),
+                    mission_id=embed_data.get('mission_id', ''),
+                    level=embed_data.get('level', 1),
+                    state=embed_data.get('state', 'UNKNOWN')
+                )
+                # Attach mission image
+                mission_path = Path('./assets/Mission.png')
+                if mission_path.exists():
+                    file_attachment = discord.File(mission_path, filename='Mission.png')
+
+            elif embed_type == 'connection':
+                embed = cls.create_connection_embed(
+                    title=embed_data.get('title', 'Player Connection'),
+                    description=embed_data.get('description', ''),
+                    player_name=embed_data.get('player_name', 'Unknown'),
+                    player_id=embed_data.get('player_id', 'Unknown')
+                )
+                # Attach connection image
+                conn_path = Path('./assets/Connections.png')
+                if conn_path.exists():
+                    file_attachment = discord.File(conn_path, filename='Connections.png')
+
+            elif embed_type == 'airdrop':
+                embed = cls.create_airdrop_embed(
+                    state=embed_data.get('state', 'Unknown'),
+                    location=embed_data.get('location', 'Unknown')
+                )
+                # Attach airdrop image
+                airdrop_path = Path('./assets/Airdrop.png')
+                if airdrop_path.exists():
+                    file_attachment = discord.File(airdrop_path, filename='Airdrop.png')
+
+            elif embed_type == 'helicrash':
+                embed = cls.create_helicrash_embed(
+                    location=embed_data.get('location', 'Unknown')
+                )
+                # Attach helicrash image
+                heli_path = Path('./assets/Helicrash.png')
+                if heli_path.exists():
+                    file_attachment = discord.File(heli_path, filename='Helicrash.png')
+
+            elif embed_type == 'trader':
+                embed = cls.create_trader_embed(
+                    location=embed_data.get('location', 'Unknown')
+                )
+                # Attach trader image
+                trader_path = Path('./assets/Trader.png')
+                if trader_path.exists():
+                    file_attachment = discord.File(trader_path, filename='Trader.png')
+
+            else:
+                # Fallback embed for unknown types
+                embed = cls.build_base_embed(
+                    "Unknown Event",
+                    f"Unknown embed type: {embed_type}",
+                    cls.COLORS['neutral']
+                )
+
+            return embed, file_attachment
+
+        except Exception as e:
+            # Create error embed if something goes wrong
+            error_embed = cls.build_base_embed(
+                "Embed Error",
+                f"Failed to create {embed_type} embed: {str(e)}",
+                cls.COLORS['error']
+            )
+            return error_embed, None
