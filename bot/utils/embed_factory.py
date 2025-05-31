@@ -173,7 +173,7 @@ class EmbedFactory:
 
         embed = cls.build_base_embed(title, description, color, 'connection')
         embed.add_field(name="Player", value=player_name, inline=True)
-        
+
         # Add server info if available
         server_info = kwargs.get('server_name', 'Unknown Server')
         embed.add_field(name="Server", value=server_info, inline=True)
@@ -352,122 +352,126 @@ class EmbedFactory:
         embed.add_field(name="Cause", value="Falling Damage", inline=True)
         return embed
 
-    @classmethod
-    async def build(cls, embed_type: str, embed_data: Dict[str, Any]) -> Tuple[discord.Embed, Optional[discord.File]]:
+    # The build method is replaced with the new connection embed logic and other modifications
+    @staticmethod
+    async def build(embed_type: str, data: Dict[str, Any]) -> Tuple[discord.Embed, Optional[discord.File]]:
         """
-        Main build method that creates embeds and handles file attachments
+        Build embed with attachment based on type
         """
-        embed = None
-        file_attachment = None
-
         try:
-            if embed_type == 'killfeed':
-                embed = cls.create_killfeed_embed(
-                    killer_name=embed_data.get('killer_name', 'Unknown'),
-                    victim_name=embed_data.get('victim_name', 'Unknown'),
-                    weapon=embed_data.get('weapon', 'Unknown'),
-                    distance=float(embed_data.get('distance', 0)) if embed_data.get('distance') else None
-                )
-                # Attach killfeed image - set thumbnail properly
-                killfeed_path = Path('./assets/Killfeed.png')
-                if killfeed_path.exists():
-                    file_attachment = discord.File(killfeed_path, filename='Killfeed.png')
-                    embed.set_thumbnail(url="attachment://Killfeed.png")
+            embed = None
+            file_attachment = None
 
-            elif embed_type == 'suicide':
-                embed = cls.create_suicide_embed(
-                    player_name=embed_data.get('player_name', 'Unknown'),
-                    cause=embed_data.get('cause', 'Unknown')
+            if embed_type == 'connection':
+                embed = discord.Embed(
+                    title=data.get('title', 'Connection Event'),
+                    description=data.get('description', 'Player connection status changed'),
+                    color=EmbedFactory.COLORS['primary'],
+                    timestamp=datetime.now(timezone.utc)
                 )
-                # Attach suicide image with thumbnail
-                suicide_path = Path('./assets/Suicide.png')
-                if suicide_path.exists():
-                    file_attachment = discord.File(suicide_path, filename='Suicide.png')
-                    embed.set_thumbnail(url="attachment://Suicide.png")
 
-            elif embed_type == 'fall':
-                embed = cls.create_fall_embed(
-                    player_name=embed_data.get('player_name', 'Unknown')
+                # Add connection fields
+                embed.add_field(
+                    name="Player Name",
+                    value=data.get('player_name', 'Unknown'),
+                    inline=True
                 )
-                # Attach falling image with thumbnail
-                falling_path = Path('./assets/Falling.png')
-                if falling_path.exists():
-                    file_attachment = discord.File(falling_path, filename='Falling.png')
-                    embed.set_thumbnail(url="attachment://Falling.png")
+
+                embed.add_field(
+                    name="Platform",
+                    value=data.get('platform', 'Unknown'),
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="Server Name", 
+                    value=data.get('server_name', 'Unknown Server'),
+                    inline=True
+                )
+
+                file_attachment = discord.File('assets/Connections.png', filename='connections.png')
+                embed.set_thumbnail(url='attachment://connections.png')
+
+            elif embed_type == 'killfeed':
+                embed = EmbedFactory.create_killfeed_embed(
+                    killer=data.get('killer', 'Unknown'),
+                    victim=data.get('victim', 'Unknown'),
+                    weapon=data.get('weapon', 'Unknown'),
+                    distance=data.get('distance', 0),
+                    headshot=data.get('headshot', False),
+                    suicide=data.get('suicide', False)
+                )
+
+                # Add killfeed icon
+                if data.get('suicide', False):
+                    file_attachment = discord.File('assets/Suicide.png', filename='suicide.png')
+                    embed.set_thumbnail(url='attachment://suicide.png')
+                else:
+                    file_attachment = discord.File('assets/Killfeed.png', filename='killfeed.png')
+                    embed.set_thumbnail(url='attachment://killfeed.png')
 
             elif embed_type == 'mission':
-                embed = cls.create_mission_embed(
-                    title=embed_data.get('title', 'Mission Update'),
-                    description=embed_data.get('description', ''),
-                    mission_id=embed_data.get('mission_id', ''),
-                    level=embed_data.get('level', 1),
-                    state=embed_data.get('state', 'UNKNOWN')
+                embed = EmbedFactory.create_mission_embed(
+                    title=data.get('title', 'Mission Update'),
+                    description=data.get('description', 'Mission status changed'),
+                    mission_id=data.get('mission_id', ''),
+                    level=data.get('level', 1),
+                    state=data.get('state', 'UNKNOWN')
                 )
-                # Attach mission image with thumbnail
-                mission_path = Path('./assets/Mission.png')
-                if mission_path.exists():
-                    file_attachment = discord.File(mission_path, filename='Mission.png')
-                    embed.set_thumbnail(url="attachment://Mission.png")
 
-            elif embed_type == 'connection':
-                embed = cls.create_connection_embed(
-                    title=embed_data.get('title', 'Player Connection'),
-                    description=embed_data.get('description', ''),
-                    player_name=embed_data.get('player_name', 'Unknown'),
-                    player_id=embed_data.get('player_id', 'Unknown')
-                )
-                # Attach connection image with thumbnail
-                conn_path = Path('./assets/Connections.png')
-                if conn_path.exists():
-                    file_attachment = discord.File(conn_path, filename='Connections.png')
-                    embed.set_thumbnail(url="attachment://Connections.png")
+                file_attachment = discord.File('assets/Mission.png', filename='mission.png')
+                embed.set_thumbnail(url='attachment://mission.png')
 
             elif embed_type == 'airdrop':
-                embed = cls.create_airdrop_embed(
-                    state=embed_data.get('state', 'Unknown'),
-                    location=embed_data.get('location', 'Unknown')
+                embed = EmbedFactory.create_airdrop_embed(
+                    state=data.get('state', 'incoming'),
+                    location=data.get('location', 'Unknown'),
+                    timestamp=datetime.now(timezone.utc)
                 )
-                # Attach airdrop image with thumbnail
-                airdrop_path = Path('./assets/Airdrop.png')
-                if airdrop_path.exists():
-                    file_attachment = discord.File(airdrop_path, filename='Airdrop.png')
-                    embed.set_thumbnail(url="attachment://Airdrop.png")
+
+                file_attachment = discord.File('assets/Airdrop.png', filename='airdrop.png')
+                embed.set_thumbnail(url='attachment://airdrop.png')
 
             elif embed_type == 'helicrash':
-                embed = cls.create_helicrash_embed(
-                    location=embed_data.get('location', 'Unknown')
+                embed = EmbedFactory.create_helicrash_embed(
+                    location=data.get('location', 'Unknown'),
+                    timestamp=datetime.now(timezone.utc)
                 )
-                # Attach helicrash image with thumbnail
-                heli_path = Path('./assets/Helicrash.png')
-                if heli_path.exists():
-                    file_attachment = discord.File(heli_path, filename='Helicrash.png')
-                    embed.set_thumbnail(url="attachment://Helicrash.png")
+
+                file_attachment = discord.File('assets/Helicrash.png', filename='helicrash.png')
+                embed.set_thumbnail(url='attachment://helicrash.png')
 
             elif embed_type == 'trader':
-                embed = cls.create_trader_embed(
-                    location=embed_data.get('location', 'Unknown')
+                embed = EmbedFactory.create_trader_embed(
+                    location=data.get('location', 'Unknown'),
+                    timestamp=datetime.now(timezone.utc)
                 )
-                # Attach trader image with thumbnail
-                trader_path = Path('./assets/Trader.png')
-                if trader_path.exists():
-                    file_attachment = discord.File(trader_path, filename='Trader.png')
-                    embed.set_thumbnail(url="attachment://Trader.png")
 
-            else:
-                # Fallback embed for unknown types
-                embed = cls.build_base_embed(
-                    "Unknown Event",
-                    f"Unknown embed type: {embed_type}",
-                    cls.COLORS['neutral']
+                file_attachment = discord.File('assets/Trader.png', filename='trader.png')
+                embed.set_thumbnail(url='attachment://trader.png')
+
+            # Default fallback
+            if not embed:
+                embed = discord.Embed(
+                    title="Event Update",
+                    description="An event has occurred",
+                    color=EmbedFactory.COLORS['primary'],
+                    timestamp=datetime.now(timezone.utc)
                 )
+
+            # Set consistent footer
+            embed.set_footer(text="Powered by Discord.gg/EmeraldServers")
 
             return embed, file_attachment
 
         except Exception as e:
-            # Create error embed if something goes wrong
-            error_embed = cls.build_base_embed(
-                "Embed Error",
-                f"Failed to create {embed_type} embed: {str(e)}",
-                cls.COLORS['error']
+            logger.error(f"Error building embed: {e}")
+            # Return basic embed on error
+            embed = discord.Embed(
+                title="System Update",
+                description="An event has occurred",
+                color=EmbedFactory.COLORS['primary'],
+                timestamp=datetime.now(timezone.utc)
             )
-            return error_embed, None
+            embed.set_footer(text="Powered by Discord.gg/EmeraldServers")
+            return embed, None

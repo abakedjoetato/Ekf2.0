@@ -55,10 +55,19 @@ class UnifiedLogParser:
     def _compile_patterns(self) -> Dict[str, re.Pattern]:
         """Compile regex patterns for log parsing"""
         return {
-            # Player connection patterns - improved to capture player names better
-            'player_queue_join': re.compile(r'LogNet: Join request: /Game/Maps/world_\d+/World_\d+\?.*eosid=\|([a-f0-9]+).*Name=([^&\?\s]+)', re.IGNORECASE),
-            'player_registered': re.compile(r'LogOnline: Warning: Player \|([a-f0-9]+) successfully registered!', re.IGNORECASE),
-            'player_disconnect': re.compile(r'UChannel::Close: Sending CloseBunch.*UniqueId: EOS:\|([a-f0-9]+)', re.IGNORECASE),
+            # Player connection patterns - explicit matching based on provided examples
+            'player_queue_join': re.compile(
+                r'LogNet: Join request: /Game/Maps/world_\d+/World_\d+\?.*?eosid=\|([a-f0-9]+).*?Name=([^&\?\s]+).*?(?:platformid=([^&\?\s]+))?',
+                re.IGNORECASE
+            ),
+            'player_registered': re.compile(
+                r'LogOnline: Warning: Player \|([a-f0-9]+) successfully registered!',
+                re.IGNORECASE
+            ),
+            'player_disconnect': re.compile(
+                r'LogNet: UChannel::Close: Sending CloseBunch.*?UniqueId: EOS:\|([a-f0-9]+)',
+                re.IGNORECASE
+            ),
 
             # Mission patterns
             'mission_respawn': re.compile(r'LogSFPS: Mission (GA_[A-Za-z0-9_]+) will respawn in (\d+)', re.IGNORECASE),
@@ -306,47 +315,81 @@ class UnifiedLogParser:
                 timestamp_match = self.patterns['timestamp'].search(line)
                 line_timestamp = timestamp_match.group(1) if timestamp_match else None
 
-                # Player connection events
+                # Queue event - Extract EosID, Player Name, and Platform
                 queue_match = self.patterns['player_queue_join'].search(line)
                 if queue_match:
-                    player_id, player_name = queue_match.groups()
-                    # Clean and decode the player name immediately
+                    groups = queue_match.groups()
+                    player_id = groups[0]
+                    player_name = groups[1] if len(groups) > 1 else "Unknown"
+                    platform = groups[2] if len(groups) > 2 and groups[2] else "Unknown"
+                    
+                    # Extract platform from platformid format (e.g., "PS5:3566759921101398874" -> "PS5")
+                    if platform and ":" in platform:
+                        platform = platform.split(":")[0]
+                    
+                    # Clean and decode the player name
                     import urllib.parse
                     try:
-                        # URL decode the name (handles %20 for spaces, etc.)
                         decoded_name = urllib.parse.unquote(player_name)
-                        # Further clean up any remaining artifacts
                         clean_name = decoded_name.replace('+', ' ').strip()
                         final_name = clean_name if clean_name else player_name.strip()
                     except Exception:
                         final_name = player_name.strip()
                     
-                    self.player_lifecycle[f"{guild_id}_{player_id}"] = {
+                    # Store in lifecycle with queue state
+                    lifecycle_key = f"{guild_id}_{player_id}"
+                    self.player_lifecycle[lifecycle_key] = {
                         'name': final_name,
-                        'raw_name': player_name,  # Keep original for debugging
+                        'platform': platform,
+                        'state': 'queued',
                         'queued_at': datetime.now(timezone.utc).isoformat()
                     }
-                    logger.debug(f"👤 Player queued: {player_id} -> '{final_name}' (raw: '{player_name}')")
+                    logger.debug(f"👤 Player queued: {player_id} -> '{final_name}' on {platform}")
 
+                # Join event - Player successfully registered
                 register_match = self.patterns['player_registered'].search(line)
                 if register_match:
                     player_id = register_match.group(1)
+                    lifecycle_key = f"{guild_id}_{player_id}"
+                    
+                    # Check if we have queue data for this player
+                    if lifecycle_key in self.player_lifecycle:
+                        # Update state to joined
+                        self.player_lifecycle[lifecycle_key]['state'] = 'joined'
+                        self.player_lifecycle[lifecycle_key]['joined_at'] = datetime.now(timezone.utc).isoformat()
+                    else:
+                        # Player joined without queue data - create minimal record
+                        self.player_lifecycle[lifecycle_key] = {
+                            'name': f"Player{player_id[:8].upper()}",
+                            'platform': 'Unknown',
+                            'state': 'joined',
+                            'joined_at': datetime.now(timezone.utc).isoformat()
+                        }
+                    
                     player_events.append({
-                        'type': 'connect',
+                        'type': 'join',
                         'player_id': player_id,
                         'timestamp': line_timestamp,
                         'line': line
                     })
 
+                # Disconnect event - Player disconnected
                 disconnect_match = self.patterns['player_disconnect'].search(line)
                 if disconnect_match:
                     player_id = disconnect_match.group(1)
-                    player_events.append({
-                        'type': 'disconnect',
-                        'player_id': player_id,
-                        'timestamp': line_timestamp,
-                        'line': line
-                    })
+                    lifecycle_key = f"{guild_id}_{player_id}"
+                    
+                    # Only emit disconnect if player was previously joined
+                    if lifecycle_key in self.player_lifecycle and self.player_lifecycle[lifecycle_key].get('state') == 'joined':
+                        self.player_lifecycle[lifecycle_key]['state'] = 'disconnected'
+                        self.player_lifecycle[lifecycle_key]['disconnected_at'] = datetime.now(timezone.utc).isoformat()
+                        
+                        player_events.append({
+                            'type': 'disconnect',
+                            'player_id': player_id,
+                            'timestamp': line_timestamp,
+                            'line': line
+                        })
 
             except Exception as e:
                 logger.error(f"Error collecting player events from line: {e}")
@@ -357,17 +400,21 @@ class UnifiedLogParser:
         
         for event in player_events:
             try:
-                if event['type'] == 'connect':
+                if event['type'] == 'join':
                     player_id = event['player_id']
-                    player_key = f"{guild_id}_{player_id}"
+                    lifecycle_key = f"{guild_id}_{player_id}"
+                    session_key = f"{guild_id}_{player_id}"
 
-                    # Resolve player name using advanced resolution
-                    player_name = await self.resolve_player_name(player_id, guild_id)
+                    # Get player data from lifecycle
+                    lifecycle_data = self.player_lifecycle.get(lifecycle_key, {})
+                    player_name = lifecycle_data.get('name', f"Player{player_id[:8].upper()}")
+                    platform = lifecycle_data.get('platform', 'Unknown')
 
-                    # Track session
-                    self.player_sessions[player_key] = {
+                    # Track active session
+                    self.player_sessions[session_key] = {
                         'player_id': player_id,
                         'player_name': player_name,
+                        'platform': platform,
                         'guild_id': guild_id,
                         'joined_at': datetime.now(timezone.utc).isoformat(),
                         'status': 'online'
@@ -378,42 +425,49 @@ class UnifiedLogParser:
 
                     # Create embed (only if not cold start)
                     if not cold_start:
-                        embed = EmbedFactory.create_connection_embed(
-                            title="Player Connected",
-                            description="New player has joined the server",
-                            player_name=player_name,
-                            player_id=player_id,
-                            server_name=server_name
-                        )
-                        embeds.append(embed)
+                        embed_data = {
+                            'title': '🔷 Reinforcements Arrive',
+                            'description': 'New player has joined the server',
+                            'player_name': player_name,
+                            'platform': platform,
+                            'server_name': server_name
+                        }
+                        
+                        final_embed, file_attachment = await EmbedFactory.build('connection', embed_data)
+                        embeds.append(final_embed)
 
                 elif event['type'] == 'disconnect':
                     player_id = event['player_id']
+                    lifecycle_key = f"{guild_id}_{player_id}"
                     session_key = f"{guild_id}_{player_id}"
 
-                    # Resolve player name using advanced resolution
-                    player_name = "Unknown Player"
+                    # Get player data from lifecycle or session
+                    lifecycle_data = self.player_lifecycle.get(lifecycle_key, {})
+                    session_data = self.player_sessions.get(session_key, {})
+                    
+                    player_name = lifecycle_data.get('name') or session_data.get('player_name', f"Player{player_id[:8].upper()}")
+                    platform = lifecycle_data.get('platform') or session_data.get('platform', 'Unknown')
+
+                    # Update session status
                     if session_key in self.player_sessions:
-                        player_name = self.player_sessions[session_key].get('player_name', 'Unknown Player')
                         self.player_sessions[session_key]['status'] = 'offline'
                         self.player_sessions[session_key]['left_at'] = datetime.now(timezone.utc).isoformat()
-                    else:
-                        # Try to resolve from database if not in current session
-                        player_name = await self.resolve_player_name(player_id, guild_id)
 
                     # Mark voice channel for update
                     voice_channel_needs_update = True
 
                     # Create embed (only if not cold start)
                     if not cold_start:
-                        embed = EmbedFactory.create_connection_embed(
-                            title="Player Disconnected",
-                            description="Player has left the server",
-                            player_name=player_name,
-                            player_id=player_id,
-                            server_name=server_name
-                        )
-                        embeds.append(embed)
+                        embed_data = {
+                            'title': '🔻 Extraction Confirmed',
+                            'description': 'Player has left the server',
+                            'player_name': player_name,
+                            'platform': platform,
+                            'server_name': server_name
+                        }
+                        
+                        final_embed, file_attachment = await EmbedFactory.build('connection', embed_data)
+                        embeds.append(final_embed)
 
             except Exception as e:
                 logger.error(f"Error processing player event: {e}")
@@ -606,11 +660,10 @@ class UnifiedLogParser:
                 if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online':
                     active_players += 1
             
-            # Count queued players (those in lifecycle but not in active sessions)
+            # Count queued players (those in 'queued' state but not joined)
             for key, lifecycle in self.player_lifecycle.items():
-                if key.startswith(guild_prefix):
-                    if key not in self.player_sessions or self.player_sessions[key].get('status') != 'online':
-                        queued_players += 1
+                if key.startswith(guild_prefix) and lifecycle.get('state') == 'queued':
+                    queued_players += 1
 
             logger.debug(f"Counted {active_players} active players and {queued_players} queued for guild {guild_id_int}")
 
@@ -695,11 +748,9 @@ class UnifiedLogParser:
                 logger.warning(f"Channel {voice_channel_id} is not a voice channel")
                 return
 
-            # Build advanced channel name
-            status_emoji = "🟢" if active_players > 0 else "🔴"
-            queue_text = f" | Queue: {queued_players}" if queued_players > 0 else ""
-            
-            new_name = f"{status_emoji} {server_name}: {active_players}/{max_players}{queue_text}"
+            # Build voice channel name with specified format
+            queue_text = f" | {queued_players} in Queue" if queued_players > 0 else ""
+            new_name = f"{server_name} | {active_players}/{max_players}{queue_text}"
             
             # Ensure name fits Discord's 100 character limit
             if len(new_name) > 100:
