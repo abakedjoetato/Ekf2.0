@@ -41,7 +41,7 @@ class UnifiedLogParser:
         self.player_lifecycle: Dict[str, Dict[str, Any]] = {}
         self.server_status: Dict[str, Dict[str, Any]] = {}
         self.log_file_hashes: Dict[str, str] = {}
-        
+
         # Player name resolution cache
         self.player_name_cache: Dict[str, str] = {}
 
@@ -326,15 +326,12 @@ class UnifiedLogParser:
                     except ValueError:
                         pass
 
-                # Extract server name if available
-                server_name_match = self.patterns['server_name_pattern'].search(line)
-                if server_name_match:
-                    extracted_server_name = server_name_match.group(1)
-                    logger.info(f"🏷️ Extracted ServerName: {extracted_server_name} for server {server_id}")
+                # Use configured server name from guild settings (no regex extraction needed)
+                # Server name is already available from server_config['name']
 
             # Store extracted server info in database during cold start
             if extracted_max_players or extracted_server_name:
-                await self._update_server_info(guild_id, server_id, extracted_max_players, extracted_server_name)
+                await self._update_server_info(guild_id, server_id, extracted_max_players)
 
         # First pass: collect all player events with timestamps for sequential processing
         for line in lines_to_process:
@@ -350,11 +347,11 @@ class UnifiedLogParser:
                     player_id = groups[0]
                     player_name = groups[1] if len(groups) > 1 else "Unknown"
                     platform = groups[2] if len(groups) > 2 and groups[2] else "Unknown"
-                    
+
                     # Extract platform from platformid format (e.g., "PS5:3566759921101398874" -> "PS5")
                     if platform and ":" in platform:
                         platform = platform.split(":")[0]
-                    
+
                     # Clean and decode the player name
                     import urllib.parse
                     try:
@@ -363,7 +360,7 @@ class UnifiedLogParser:
                         final_name = clean_name if clean_name else player_name.strip()
                     except Exception:
                         final_name = player_name.strip()
-                    
+
                     # Store in lifecycle with queue state
                     lifecycle_key = f"{guild_id}_{player_id}"
                     self.player_lifecycle[lifecycle_key] = {
@@ -379,7 +376,7 @@ class UnifiedLogParser:
                 if register_match:
                     player_id = register_match.group(1)
                     lifecycle_key = f"{guild_id}_{player_id}"
-                    
+
                     # Check if we have queue data for this player
                     if lifecycle_key in self.player_lifecycle:
                         # Update state to joined
@@ -393,7 +390,7 @@ class UnifiedLogParser:
                             'state': 'joined',
                             'joined_at': datetime.now(timezone.utc).isoformat()
                         }
-                    
+
                     player_events.append({
                         'type': 'join',
                         'player_id': player_id,
@@ -406,12 +403,12 @@ class UnifiedLogParser:
                 if disconnect_match:
                     player_id = disconnect_match.group(1)
                     lifecycle_key = f"{guild_id}_{player_id}"
-                    
+
                     # Only emit disconnect if player was previously joined
                     if lifecycle_key in self.player_lifecycle and self.player_lifecycle[lifecycle_key].get('state') == 'joined':
                         self.player_lifecycle[lifecycle_key]['state'] = 'disconnected'
                         self.player_lifecycle[lifecycle_key]['disconnected_at'] = datetime.now(timezone.utc).isoformat()
-                        
+
                         player_events.append({
                             'type': 'disconnect',
                             'player_id': player_id,
@@ -425,7 +422,7 @@ class UnifiedLogParser:
 
         # Process player events in chronological order
         player_events.sort(key=lambda x: x['timestamp'] if x['timestamp'] else '')
-        
+
         for event in player_events:
             try:
                 if event['type'] == 'join':
@@ -460,7 +457,7 @@ class UnifiedLogParser:
                             'platform': platform,
                             'server_name': server_name
                         }
-                        
+
                         final_embed, file_attachment = await EmbedFactory.build('connection', embed_data)
                         embeds.append(final_embed)
 
@@ -472,7 +469,7 @@ class UnifiedLogParser:
                     # Get player data from lifecycle or session
                     lifecycle_data = self.player_lifecycle.get(lifecycle_key, {})
                     session_data = self.player_sessions.get(session_key, {})
-                    
+
                     player_name = lifecycle_data.get('name') or session_data.get('player_name', f"Player{player_id[:8].upper()}")
                     platform = lifecycle_data.get('platform') or session_data.get('platform', 'Unknown')
 
@@ -493,7 +490,7 @@ class UnifiedLogParser:
                             'platform': platform,
                             'server_name': server_name
                         }
-                        
+
                         final_embed, file_attachment = await EmbedFactory.build('connection', embed_data)
                         embeds.append(final_embed)
 
@@ -687,7 +684,7 @@ class UnifiedLogParser:
             for key, session in self.player_sessions.items():
                 if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online':
                     active_players += 1
-            
+
             # Count queued players (those in 'queued' state but not joined)
             for key, lifecycle in self.player_lifecycle.items():
                 if key.startswith(guild_prefix) and lifecycle.get('state') == 'queued':
@@ -709,12 +706,12 @@ class UnifiedLogParser:
             servers = guild_config.get('servers', [])
             server_name = "Unknown Server"
             max_players = 60  # Default
-            
+
             if servers:
                 # Use first server's info for display (most common case is single server)
                 primary_server = servers[0]
                 server_name = primary_server.get('name', 'Server').replace(' Server', '').replace(' EU', '').replace(' US', '')
-                
+
                 # Try to get MaxPlayerCount from database first, then fallback to config
                 try:
                     stored_max_players = await self._get_server_max_players(guild_id_int, str(primary_server.get('_id', '')))
@@ -791,7 +788,7 @@ class UnifiedLogParser:
             # Build voice channel name with specified format
             queue_text = f" | {queued_players} in Queue" if queued_players > 0 else ""
             new_name = f"{server_name} | {active_players}/{max_players}{queue_text}"
-            
+
             # Ensure name fits Discord's 100 character limit
             if len(new_name) > 100:
                 # Truncate server name if needed
@@ -802,13 +799,13 @@ class UnifiedLogParser:
                 else:
                     # Fallback to simple format
                     new_name = f"{status_emoji} Players: {active_players}/{max_players}"
-            
+
             if voice_channel.name != new_name:
                 try:
                     # Direct voice channel update - no rate limiter needed for voice channels
                     await voice_channel.edit(name=new_name)
                     logger.info(f"✅ Voice channel updated to: {new_name}")
-                        
+
                 except discord.HTTPException as e:
                     if e.status == 429:  # Rate limited
                         logger.warning(f"Rate limited updating voice channel: {e}")
@@ -871,7 +868,7 @@ class UnifiedLogParser:
                 # Determine channel type and embed type
                 channel_type = 'events'
                 embed_type = 'general'
-                
+
                 if embed.title:
                     title_lower = embed.title.lower()
                     if any(word in title_lower for word in ['connect', 'disconnect', 'join', 'left']):
@@ -905,7 +902,7 @@ class UnifiedLogParser:
                             'player_id': 'Unknown',
                             'location': 'Unknown'
                         }
-                        
+
                         # Extract data from embed fields if available
                         for field in embed.fields:
                             if field.name.lower() == 'mission':
@@ -919,7 +916,7 @@ class UnifiedLogParser:
 
                         # Use EmbedFactory to build with proper attachment
                         final_embed, file_attachment = await EmbedFactory.build(embed_type, embed_data)
-                        
+
                         # Set priority for rate limiter
                         from bot.utils.advanced_rate_limiter import MessagePriority
                         priority = MessagePriority.NORMAL
@@ -929,7 +926,7 @@ class UnifiedLogParser:
                                 priority = MessagePriority.HIGH
                             elif 'mission' in title_lower and 'ready' in title_lower:
                                 priority = MessagePriority.HIGH
-                        
+
                         # Send with rate limiter if available
                         if hasattr(self.bot, 'advanced_rate_limiter'):
                             await self.bot.advanced_rate_limiter.queue_message(
@@ -944,7 +941,7 @@ class UnifiedLogParser:
                                 await channel.send(embed=final_embed, file=file_attachment)
                             else:
                                 await channel.send(embed=final_embed)
-                                
+
                     except Exception as e:
                         logger.error(f"Failed to send embed: {e}")
 
@@ -999,10 +996,10 @@ class UnifiedLogParser:
                             event_types['helicrashes'] = event_types.get('helicrashes', 0) + 1
                         elif 'trader' in title_lower:
                             event_types['traders'] = event_types.get('traders', 0) + 1
-                
+
                 if connection_events:
                     event_types['connections'] = connection_events
-                
+
                 event_summary = ", ".join([f"{count} {type_name}" for type_name, count in event_types.items()])
                 logger.info(f"✅ {server_name}: {len(embeds)} total events sent ({event_summary})")
             else:
@@ -1092,14 +1089,14 @@ class UnifiedLogParser:
         """Get parser status"""
         try:
             active_sessions = sum(1 for session in self.player_sessions.values() if session.get('status') == 'online')
-            
+
             # Calculate active players by guild
             active_players_by_guild = {}
             for key, session in self.player_sessions.items():
                 if session.get('status') == 'online':
                     guild_id = session.get('guild_id', 'unknown')
                     active_players_by_guild[guild_id] = active_players_by_guild.get(guild_id, 0) + 1
-            
+
             # Check SFTP connection status
             active_connections = 0
             for conn in self.sftp_connections.values():
@@ -1108,7 +1105,7 @@ class UnifiedLogParser:
                         active_connections += 1
                 except:
                     pass
-            
+
             return {
                 'active_sessions': active_sessions,
                 'total_tracked_servers': len(self.file_states),
@@ -1151,7 +1148,7 @@ class UnifiedLogParser:
                 cached_name = self.player_name_cache[cache_key]
                 if not cached_name.startswith('Player_') and cached_name != 'Unknown Player':
                     return cached_name
-            
+
             # Method 1: Check current session lifecycle (most recent and most reliable)
             lifecycle_key = f"{guild_id}_{player_id}"
             if lifecycle_key in self.player_lifecycle:
@@ -1171,18 +1168,18 @@ class UnifiedLogParser:
                                 decoded_name = new_decoded
                             except:
                                 break
-                        
+
                         # Clean up artifacts and normalize
                         clean_name = decoded_name.replace('+', ' ').replace('%20', ' ')
                         clean_name = re.sub(r'[^\w\s\-_\[\]().]', '', clean_name).strip()
-                        
+
                         if clean_name and len(clean_name) >= 2 and clean_name != 'Unknown Player':
                             self.player_name_cache[cache_key] = clean_name
                             logger.info(f"✅ Resolved player name from lifecycle: {player_id} -> {clean_name}")
                             return clean_name
                     except Exception as decode_error:
                         logger.warning(f"Failed to decode player name '{name}': {decode_error}")
-            
+
             # Method 2: Enhanced database lookup with fuzzy matching
             if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
                 try:
@@ -1191,14 +1188,14 @@ class UnifiedLogParser:
                         'guild_id': int(guild_id),
                         'player_id': player_id
                     })
-                    
+
                     if pvp_doc:
                         name = pvp_doc.get('player_name')
                         if name and name.strip() and name != 'Unknown Player' and not name.startswith('Player_'):
                             self.player_name_cache[cache_key] = name
                             logger.info(f"✅ Resolved player name from PvP data: {player_id} -> {name}")
                             return name
-                    
+
                     # 2b: Multiple partial ID matching strategies
                     for prefix_length in [12, 8, 6, 4]:
                         if len(player_id) >= prefix_length:
@@ -1207,7 +1204,7 @@ class UnifiedLogParser:
                                 'guild_id': int(guild_id),
                                 'player_id': {'$regex': f'^{partial_id}', '$options': 'i'}
                             }).sort('last_updated', -1).limit(5)
-                            
+
                             async for pvp_doc in pvp_cursor:
                                 name = pvp_doc.get('player_name')
                                 if name and name.strip() and name != 'Unknown Player' and not name.startswith('Player_'):
@@ -1222,7 +1219,7 @@ class UnifiedLogParser:
                                     except:
                                         pass
                                     return name
-                    
+
                     # 2c: Check all recent PvP activity (last 7 days) for pattern matching
                     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
                     recent_cursor = self.bot.db_manager.pvp_data.find({
@@ -1230,11 +1227,11 @@ class UnifiedLogParser:
                         'last_updated': {'$gte': week_ago},
                         'player_name': {'$exists': True, '$ne': None}
                     }).sort('last_updated', -1).limit(100)
-                    
+
                     async for pvp_doc in recent_cursor:
                         doc_player_id = pvp_doc.get('player_id', '')
                         name = pvp_doc.get('player_name', '')
-                        
+
                         # Check for similar player IDs (common prefix/suffix patterns)
                         if doc_player_id and name and not name.startswith('Player_'):
                             similarity_score = 0
@@ -1245,25 +1242,25 @@ class UnifiedLogParser:
                                     common_prefix += 1
                                 else:
                                     break
-                            
+
                             if common_prefix >= 8:  # Strong similarity
                                 self.player_name_cache[cache_key] = name
                                 logger.info(f"✅ Resolved player name from similar ID: {player_id} -> {name} (similarity: {common_prefix})")
                                 return name
-                    
+
                     # 2d: Check linked players with expanded search
                     player_doc = await self.bot.db_manager.players.find_one({
                         'guild_id': int(guild_id),
                         'player_id': player_id
                     })
-                    
+
                     if player_doc:
                         name = player_doc.get('primary_character') or (player_doc.get('linked_characters', [None])[0])
                         if name and name.strip() and name != 'Unknown Player':
                             self.player_name_cache[cache_key] = name
                             logger.info(f"✅ Resolved player name from linked players: {player_id} -> {name}")
                             return name
-                    
+
                     # 2e: Cross-reference with kill events in the last 24 hours
                     yesterday = datetime.now(timezone.utc) - timedelta(days=1)
                     kill_cursor = self.bot.db_manager.kill_events.find({
@@ -1274,7 +1271,7 @@ class UnifiedLogParser:
                             {'victim_id': player_id}
                         ]
                     }).sort('timestamp', -1).limit(10)
-                    
+
                     async for kill_event in kill_cursor:
                         if kill_event.get('killer_id') == player_id:
                             name = kill_event.get('killer')
@@ -1282,21 +1279,21 @@ class UnifiedLogParser:
                             name = kill_event.get('victim')
                         else:
                             continue
-                        
+
                         if name and name.strip() and name != 'Unknown Player' and not name.startswith('Player_'):
                             self.player_name_cache[cache_key] = name
                             logger.info(f"✅ Resolved player name from kill events: {player_id} -> {name}")
                             return name
-                            
+
                 except Exception as db_error:
                     logger.error(f"Database lookup failed for player {player_id}: {db_error}")
-            
+
             # Method 3: Check other active sessions for similar player IDs
             for session_key, session in self.player_sessions.items():
                 if session_key.startswith(f"{guild_id}_") and session.get('status') == 'online':
                     session_player_id = session.get('player_id', '')
                     session_player_name = session.get('player_name', '')
-                    
+
                     if session_player_id and session_player_name and not session_player_name.startswith('Player_'):
                         # Check for ID similarity (they might be similar players)
                         if len(session_player_id) >= 8 and len(player_id) >= 8:
@@ -1305,7 +1302,7 @@ class UnifiedLogParser:
                                 logger.info(f"✅ Resolved player name from similar session: {player_id} -> {session_player_name}")
                                 self.player_name_cache[cache_key] = session_player_name
                                 return session_player_name
-            
+
             # Method 4: Last resort - create a meaningful temporary name and try to resolve later
             # Generate a more user-friendly temporary name
             if len(player_id) >= 8:
@@ -1313,20 +1310,20 @@ class UnifiedLogParser:
                 prefix = player_id[:4].upper()
                 suffix = player_id[-4:].upper()
                 temp_name = f"Player{prefix}{suffix}"
-                
+
                 # Store in cache but mark it as temporary
                 self.player_name_cache[cache_key] = temp_name
-                
+
                 # Schedule a delayed lookup attempt
                 asyncio.create_task(self._delayed_name_resolution(player_id, guild_id, cache_key))
-                
+
                 logger.warning(f"⚠️ Using temporary name {temp_name} for player {player_id} - scheduling delayed resolution")
                 return temp_name
-            
+
             # Absolute fallback
             logger.error(f"❌ CRITICAL: Could not resolve player name for {player_id} in any way")
             return f"Player{player_id[:8].upper()}" if len(player_id) >= 8 else "UnknownPlayer"
-            
+
         except Exception as e:
             logger.error(f"Error in enhanced player name resolution for {player_id}: {e}")
             return f"Player{player_id[:8].upper()}" if len(player_id) >= 8 else "UnknownPlayer"
@@ -1336,7 +1333,7 @@ class UnifiedLogParser:
         try:
             # Wait 30 seconds for potential database updates
             await asyncio.sleep(30)
-            
+
             # Try resolution again with database priority
             if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
                 # Check if player has appeared in recent PvP data
@@ -1344,14 +1341,14 @@ class UnifiedLogParser:
                     'guild_id': int(guild_id),
                     'player_id': player_id
                 })
-                
+
                 if pvp_doc:
                     name = pvp_doc.get('player_name')
                     if name and name.strip() and not name.startswith('Player_'):
                         self.player_name_cache[cache_key] = name
                         logger.info(f"✅ Delayed resolution successful: {player_id} -> {name}")
                         return
-                
+
                 # Check recent kill events again
                 recent = datetime.now(timezone.utc) - timedelta(minutes=10)
                 kill_cursor = self.bot.db_manager.kill_events.find({
@@ -1362,7 +1359,7 @@ class UnifiedLogParser:
                         {'victim_id': player_id}
                     ]
                 }).sort('timestamp', -1).limit(5)
-                
+
                 async for kill_event in kill_cursor:
                     if kill_event.get('killer_id') == player_id:
                         name = kill_event.get('killer')
@@ -1370,18 +1367,18 @@ class UnifiedLogParser:
                         name = kill_event.get('victim')
                     else:
                         continue
-                    
+
                     if name and name.strip() and not name.startswith('Player_'):
                         self.player_name_cache[cache_key] = name
                         logger.info(f"✅ Delayed resolution from kills: {player_id} -> {name}")
                         return
-            
+
             logger.debug(f"Delayed resolution failed for {player_id} - keeping temporary name")
-            
+
         except Exception as e:
             logger.error(f"Error in delayed name resolution: {e}")
 
-    async def _update_server_info(self, guild_id: str, server_id: str, max_players: Optional[int], server_name: Optional[str]):
+    async def _update_server_info(self, guild_id: str, server_id: str, max_players: Optional[int]):
         """Update server information in database"""
         try:
             if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
@@ -1389,12 +1386,9 @@ class UnifiedLogParser:
 
             guild_id_int = int(guild_id)
             update_data = {}
-            
+
             if max_players:
                 update_data['max_players'] = max_players
-                
-            if server_name:
-                update_data['extracted_server_name'] = server_name
 
             if update_data:
                 # Update the guild's server configuration
