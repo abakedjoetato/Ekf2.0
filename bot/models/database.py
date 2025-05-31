@@ -817,3 +817,21 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get all parser states: {e}")
             return {}
+
+    async def update_server_config(self, guild_id: int, server_id: str, config_updates: Dict[str, Any]) -> bool:
+        """Update server configuration in guild document"""
+        try:
+            result = await self.guilds.update_one(
+                {
+                    "guild_id": guild_id,
+                    "servers._id": server_id
+                },
+                {
+                    "$set": {f"servers.$.{key}": value for key, value in config_updates.items()},
+                    "$currentDate": {"last_updated": True}
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Failed to update server config: {e}")
+            return False

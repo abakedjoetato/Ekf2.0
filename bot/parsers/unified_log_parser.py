@@ -69,6 +69,10 @@ class UnifiedLogParser:
                 re.IGNORECASE
             ),
 
+            # Server configuration patterns
+            'max_player_count': re.compile(r'MaxPlayerCount=(\d+)', re.IGNORECASE),
+            'server_name_pattern': re.compile(r'ServerName=([^,\s]+)', re.IGNORECASE),
+
             # Mission patterns
             'mission_respawn': re.compile(r'LogSFPS: Mission (GA_[A-Za-z0-9_]+) will respawn in (\d+)', re.IGNORECASE),
             'mission_state_change': re.compile(r'LogSFPS: Mission (GA_[A-Za-z0-9_]+) switched to ([A-Z_]+)', re.IGNORECASE),
@@ -307,6 +311,30 @@ class UnifiedLogParser:
         # Track voice channel updates needed and player events for sequential processing
         voice_channel_needs_update = False
         player_events = []
+        extracted_max_players = None
+        extracted_server_name = None
+
+        # Extract server configuration during cold start
+        if cold_start:
+            for line in lines:
+                # Extract MaxPlayerCount
+                max_player_match = self.patterns['max_player_count'].search(line)
+                if max_player_match:
+                    try:
+                        extracted_max_players = int(max_player_match.group(1))
+                        logger.info(f"📊 Extracted MaxPlayerCount: {extracted_max_players} for server {server_id}")
+                    except ValueError:
+                        pass
+
+                # Extract server name if available
+                server_name_match = self.patterns['server_name_pattern'].search(line)
+                if server_name_match:
+                    extracted_server_name = server_name_match.group(1)
+                    logger.info(f"🏷️ Extracted ServerName: {extracted_server_name} for server {server_id}")
+
+            # Store extracted server info in database during cold start
+            if extracted_max_players or extracted_server_name:
+                await self._update_server_info(guild_id, server_id, extracted_max_players, extracted_server_name)
 
         # First pass: collect all player events with timestamps for sequential processing
         for line in lines_to_process:
@@ -686,7 +714,19 @@ class UnifiedLogParser:
                 # Use first server's info for display (most common case is single server)
                 primary_server = servers[0]
                 server_name = primary_server.get('name', 'Server').replace(' Server', '').replace(' EU', '').replace(' US', '')
-                max_players = primary_server.get('max_players', 60)
+                
+                # Try to get MaxPlayerCount from database first, then fallback to config
+                try:
+                    stored_max_players = await self._get_server_max_players(guild_id_int, str(primary_server.get('_id', '')))
+                    if stored_max_players:
+                        max_players = stored_max_players
+                        logger.debug(f"Using database MaxPlayerCount: {max_players}")
+                    else:
+                        max_players = primary_server.get('max_players', 60)
+                        logger.debug(f"Using config max_players: {max_players}")
+                except Exception as e:
+                    logger.warning(f"Failed to get stored max players: {e}")
+                    max_players = primary_server.get('max_players', 60)
 
             # Find voice channel ID with comprehensive mapping
             voice_channel_id = None
@@ -1340,6 +1380,58 @@ class UnifiedLogParser:
             
         except Exception as e:
             logger.error(f"Error in delayed name resolution: {e}")
+
+    async def _update_server_info(self, guild_id: str, server_id: str, max_players: Optional[int], server_name: Optional[str]):
+        """Update server information in database"""
+        try:
+            if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
+                return
+
+            guild_id_int = int(guild_id)
+            update_data = {}
+            
+            if max_players:
+                update_data['max_players'] = max_players
+                
+            if server_name:
+                update_data['extracted_server_name'] = server_name
+
+            if update_data:
+                # Update the guild's server configuration
+                await self.bot.db_manager.guilds.update_one(
+                    {
+                        "guild_id": guild_id_int,
+                        "servers._id": server_id
+                    },
+                    {
+                        "$set": {f"servers.$.{key}": value for key, value in update_data.items()}
+                    }
+                )
+                logger.info(f"✅ Updated server info for {server_id}: {update_data}")
+
+        except Exception as e:
+            logger.error(f"Failed to update server info: {e}")
+
+    async def _get_server_max_players(self, guild_id: int, server_id: str) -> Optional[int]:
+        """Get stored MaxPlayerCount from database"""
+        try:
+            if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
+                return None
+
+            guild_config = await self.bot.db_manager.get_guild(guild_id)
+            if not guild_config:
+                return None
+
+            servers = guild_config.get('servers', [])
+            for server in servers:
+                if str(server.get('_id', '')) == str(server_id):
+                    return server.get('max_players')
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to get server max players: {e}")
+            return None
 
     def get_active_player_count(self, guild_id: str) -> int:
         """Get active player count for a guild"""
